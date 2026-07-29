@@ -3,8 +3,11 @@ import os
 
 import requests
 
+TELEGRAM_TEXT_LIMIT = 3500  # 텔레그램 한도 4096보다 여유 있게 자름 (P2-6)
+
 
 def send(text):
+    text = text[:TELEGRAM_TEXT_LIMIT]
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
@@ -21,6 +24,7 @@ def send(text):
             return False
         return True
     except requests.RequestException as exc:
+        # str(exc)는 요청 URL(=봇 토큰 포함)을 담을 수 있으므로 클래스명만 출력한다
         print("[알림 실패] %s" % type(exc).__name__)
         return False
 
@@ -31,7 +35,13 @@ def fmt_transition(site_name, new_status, reason, prev_status, duration_sec):
         return "🔴 [%s] 이상 감지 — %s" % (site_name, reason)
     if new_status == "WARN":
         return "🟠 [%s] %s · 계속 감시" % (site_name, reason)
-    minutes = max(1, duration_sec // 60)
     if prev_status in ("FAIL", "WARN"):
-        return "🟢 [%s] 회복 — %d분 만에 정상 복귀" % (site_name, minutes)
+        return "🟢 [%s] 회복 — %s 만에 정상 복귀" % (site_name, _fmt_duration(duration_sec))
     return "🟢 [%s] 정상" % site_name
+
+
+def _fmt_duration(seconds):
+    """10초 장애를 '1분'으로 부풀리지 않는다 (P3-5)"""
+    if seconds < 60:
+        return "%d초" % max(1, seconds)
+    return "%d분" % (seconds // 60)

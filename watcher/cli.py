@@ -1,10 +1,11 @@
-"""CLI — status(현재 상태 1회 출력) / once(체크 1회+전이 알림) / watch(주기 순찰)"""
+"""CLI — status(현재 상태 1회, 읽기 전용) / once(체크 1회+알림) / watch(주기 순찰)"""
 import argparse
 import datetime
+import sys
 import time
 
 from . import checks, notify, state as state_mod
-from .config import load_env, load_sites
+from .config import load_env, load_sites, validate_sites
 
 DOT = {"OK": "\U0001f7e2", "WARN": "\U0001f7e0", "FAIL": "\U0001f534"}
 
@@ -13,20 +14,37 @@ def _now():
     return datetime.datetime.now().strftime("%H:%M:%S")
 
 
-def run_pass(sites, st, alert):
-    """전 사이트 1회 체크. alert=True면 상태 전이 시 알림 발송."""
+def run_pass(sites, st, alert, persist=True):
+    """전 사이트 1회 체크. 사이트 하나의 예외가 전체 순찰을 죽이지 않게 격리(P2-3).
+
+    alert=False(status 명령)면 state를 읽지도 쓰지도 않는다 — 조회가 전이를
+    소비해 장애 알림이 증발하던 문제(P1-2)의 교정.
+    """
     for key, site in sites.items():
-        results = checks.check_site(site)
-        status, reason = state_mod.summarize(results)
-        changed, prev, duration = state_mod.transition(st, key, status, reason)
-        print("%s [%s] %s %s" % (_now(), site["name"], DOT[status], reason))
-        if alert and changed:
-            notify.send(notify.fmt_transition(site["name"], status, reason, prev, duration))
+        try:
+            results = checks.check_site(site)
+            status, reason = state_mod.summarize(results)
+        except Exception as exc:
+            status, reason = "FAIL", "체크 자체 실패: %s" % type(exc).__name__
+        print("%s [%s] %s %s" % (_now(), site.get("name", key), DOT[status], reason))
+        if not alert:
+            continue
+        obs = state_mod.observe(st, key, status, reason, confirm=site.get("confirm_checks", 1))
+        if obs["alert"]:
+            sent = notify.send(
+                notify.fmt_transition(
+                    site.get("name", key), obs["status"], obs["reason"],
+                    obs["prev_notified"], obs["duration_sec"],
+                )
+            )
+            if sent:
+                state_mod.mark_notified(st, key)
+    if alert and persist:
+        state_mod.save_state(st)
 
 
 def cmd_status(sites, _args):
-    st = state_mod.load_state()
-    run_pass(sites, st, alert=False)
+    run_pass(sites, {}, alert=False)
 
 
 def cmd_once(sites, _args):
@@ -38,25 +56,45 @@ def cmd_watch(sites, args):
     st = state_mod.load_state()
     interval = args.interval
     print("순찰 시작 — %d초 간격, 대상 %d개 (중단: Ctrl+C)" % (interval, len(sites)))
-    while True:
-        run_pass(sites, st, alert=True)
-        time.sleep(interval)
+    next_run = time.monotonic()
+    try:
+        while True:
+            run_pass(sites, st, alert=True)
+            next_run += interval
+            time.sleep(max(0, next_run - time.monotonic()))
+    except KeyboardInterrupt:
+        print("\n순찰 종료")
+
+
+def _positive_interval(value):
+    interval = int(value)
+    if interval < 5:
+        raise argparse.ArgumentTypeError("간격은 5초 이상이어야 합니다")
+    return interval
 
 
 def main():
     load_env()
     parser = argparse.ArgumentParser(prog="watcher", description="배포 검증 워처")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("status", help="현재 상태 1회 출력 (알림 없음)")
+    sub.add_parser("status", help="현재 상태 1회 출력 (읽기 전용 — 알림·기록 없음)")
     sub.add_parser("once", help="체크 1회 + 상태 전이 시 알림")
     watch = sub.add_parser("watch", help="주기 순찰")
-    watch.add_argument("--interval", type=int, default=300, help="순찰 간격(초), 기본 300")
+    watch.add_argument("--interval", type=_positive_interval, default=300,
+                       help="순찰 간격(초), 기본 300, 최소 5")
     args = parser.parse_args()
 
     sites = load_sites()
     if not sites:
         print("감시 대상이 없습니다. sites.json을 확인하세요.")
-        return
+        sys.exit(2)
+    errors, warnings = validate_sites(sites)
+    for warning in warnings:
+        print("[경고] %s" % warning)
+    if errors:
+        for error in errors:
+            print("[설정 오류] %s" % error)
+        sys.exit(2)
 
     {"status": cmd_status, "once": cmd_once, "watch": cmd_watch}[args.command](sites, args)
 
