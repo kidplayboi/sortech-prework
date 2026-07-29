@@ -31,6 +31,13 @@ def send(text):
         return False
 
 
+def fmt_missed(site_name, missed_reason, duration_sec):
+    """통보 전에 스스로 복구된 순단 — 조용히 버리지 않고 사후 1회 보고 (G1)"""
+    tail = " (%s 지속)" % _fmt_duration(duration_sec) if duration_sec > 0 else ""
+    return "🟠 [%s] 순단 후 자가 복구 — 미통보 장애 있었음: %s%s" % (
+        site_name, missed_reason, tail)
+
+
 def fmt_transition(site_name, new_status, reason, prev_status, duration_sec):
     """알림 문구 3요소 — 어느 층 + 기대 vs 실측 + 조치 힌트 (reason에 층·실측 포함)"""
     if new_status == "FAIL":

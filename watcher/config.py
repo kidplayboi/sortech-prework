@@ -52,13 +52,22 @@ def validate_sites(sites):
                 errors.append("%s: 필수 항목 '%s' 없음" % (key, field))
                 bad_keys.add(key)
         markers = site.get("markers")
-        if markers is not None and not isinstance(markers, list):
-            errors.append("%s: markers는 리스트여야 함 (문자열이면 글자 단위로 오검사됨)" % key)
+        if markers is not None and (
+            not isinstance(markers, list)
+            or any(not isinstance(m, str) for m in markers)
+        ):
+            errors.append("%s: markers는 문자열 리스트여야 함" % key)
+            bad_keys.add(key)
+        version_url = site.get("version_url")
+        if version_url is not None and not isinstance(version_url, str):
+            errors.append("%s: version_url은 문자열이어야 함" % key)
             bad_keys.add(key)
         for field in ("confirm_checks", "timeout_sec"):
             value = site.get(field)
-            if value is not None and not isinstance(value, int):
-                errors.append("%s: %s는 정수여야 함 (현재 %r)" % (key, field, value))
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or value < 1
+            ):  # bool은 int의 하위 타입이라 명시 제외 (G9)
+                errors.append("%s: %s는 1 이상 정수여야 함 (현재 %r)" % (key, field, value))
                 bad_keys.add(key)
         if not markers:
             warnings.append("%s: markers 미설정 — L2 내용 검증 비활성" % key)

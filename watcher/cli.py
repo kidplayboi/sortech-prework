@@ -1,6 +1,7 @@
 """CLI — status(현재 상태 1회, 읽기 전용) / once(체크 1회+알림) / watch(주기 순찰)"""
 import argparse
 import datetime
+import os
 import sys
 import time
 
@@ -21,16 +22,24 @@ def run_pass(sites, st, alert, persist=True):
     소비해 장애 알림이 증발하던 문제(P1-2)의 교정.
     """
     for key, site in sites.items():
-        try:  # 격리 범위 = 루프 본문 전체 — observe/알림 단계의 예외도 다음 사이트로 전파 금지 (N3)
+        try:
             results = checks.check_site(site)
             status, reason = state_mod.summarize(results)
-            print("%s [%s] %s %s" % (_now(), site.get("name", key), DOT[status], reason))
-            if not alert:
-                continue
+        except Exception as exc:
+            # 체크 예외도 FAIL 상태로 만들어 알림 경로를 태운다 — 예외를 콘솔에만
+            # 남기면 그 사이트는 영구 무감시·무알림이 된다 (3차 게이트 G2 교정)
+            status, reason = "FAIL", "체크 자체 실패: %s" % type(exc).__name__
+        print("%s [%s] %s %s" % (_now(), site.get("name", key), DOT[status], reason))
+        if not alert:
+            continue
+        try:  # 상태·알림 단계도 사이트별 격리 (N3)
             obs = state_mod.observe(
                 st, key, status, reason, confirm=site.get("confirm_checks", 1)
             )
-            if obs["alert"]:
+            if obs.get("missed_reason"):
+                notify.send(notify.fmt_missed(
+                    site.get("name", key), obs["missed_reason"], obs["duration_sec"]))
+            elif obs["alert"]:
                 sent = notify.send(
                     notify.fmt_transition(
                         site.get("name", key), obs["status"], obs["reason"],
@@ -40,7 +49,7 @@ def run_pass(sites, st, alert, persist=True):
                 if sent:
                     state_mod.mark_notified(st, key)
         except Exception as exc:
-            print("%s [%s] ⚠️ 처리 실패: %s" % (_now(), site.get("name", key) if isinstance(site, dict) else key, type(exc).__name__))
+            print("%s [%s] ⚠️ 상태 처리 실패: %s" % (_now(), site.get("name", key), type(exc).__name__))
     if alert and persist:
         state_mod.save_state(st)
 
@@ -76,10 +85,19 @@ def _positive_interval(value):
 
 
 def main():
-    # 한글 Windows(cp949) 콘솔/리다이렉트에서 이모지 출력이 죽지 않게 (N9)
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    # 한글 Windows(cp949) 콘솔/리다이렉트에서 한글·이모지 출력이 죽지 않게 (N9·G10)
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     load_env()
+    # 텔레그램 반쪽 설정은 조용한 오설정 — 콘솔로 새는데 '전달 성공'으로 기록된다 (G5)
+    has_token = bool(os.environ.get("TELEGRAM_BOT_TOKEN"))
+    has_chat = bool(os.environ.get("TELEGRAM_CHAT_ID"))
+    if has_token != has_chat:
+        print("[설정 오류] TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID 중 하나만 설정됨 — 둘 다 넣거나 둘 다 비우세요(비우면 콘솔 알림 데모 모드)")
+        sys.exit(2)
+    if not has_token:
+        print("[안내] 텔레그램 미설정 — 알림은 콘솔로 출력됩니다 (데모 모드)")
     parser = argparse.ArgumentParser(prog="watcher", description="배포 검증 워처")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status", help="현재 상태 1회 출력 (읽기 전용 — 알림·기록 없음)")

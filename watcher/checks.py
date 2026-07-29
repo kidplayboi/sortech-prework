@@ -10,6 +10,7 @@ L3 배포반영 — 원본(캐시 우회)과 사용자 화면(캐시 경유)의 
 """
 import time
 import urllib.parse
+from concurrent import futures
 
 import requests
 
@@ -40,23 +41,34 @@ def check_site(site):
 def _bounded_get(url, timeout_sec):
     """총 시한·크기 상한이 있는 GET. 반환: (status_code, body_bytes, headers, truncated)
 
-    truncated=True는 본문이 '부분 수신'임을 뜻한다 — 이 신호 없이 부분 본문을
-    정상 응답처럼 반환하면, 느린 사이트의 멀쩡한 페이지가 "내용 없음"으로
-    오탐된다 (2차 게이트 N1 교정).
+    - 총 시한: 별도 스레드 + future 타임아웃으로 강제한다. 인라인 데드라인 검사는
+      iter_content가 청크를 채울 때까지 블록해 시한을 수 배 초과할 수 있음이
+      실측됐다 (3차 게이트 G3 — timeout 3초 설정에 실소요 11.6초). 시한 초과 시
+      requests.Timeout을 던지며, 백그라운드 스레드는 read timeout까지 스스로 정리된다.
+    - truncated=True는 '크기 상한으로 잘린 부분 본문'을 뜻한다 — 이 신호 없이
+      부분 본문을 정상 응답처럼 반환하면 멀쩡한 페이지가 오탐된다 (2차 N1 교정).
     """
-    deadline = time.monotonic() + timeout_sec
-    resp = requests.get(
-        url, timeout=(5, timeout_sec), stream=True, headers={"User-Agent": UA}
-    )
-    chunks, size, truncated = [], 0, False
-    with resp:  # 예외 경로에서도 커넥션 반환 (N11)
-        for chunk in resp.iter_content(8192):
-            chunks.append(chunk)
-            size += len(chunk)
-            if size > MAX_BODY_BYTES or time.monotonic() > deadline:
-                truncated = True
-                break
-    return resp.status_code, b"".join(chunks), resp.headers, truncated
+    def _fetch():
+        resp = requests.get(
+            url, timeout=(5, timeout_sec), stream=True, headers={"User-Agent": UA}
+        )
+        chunks, size, truncated = [], 0, False
+        with resp:  # 예외 경로에서도 커넥션 반환 (N11)
+            for chunk in resp.iter_content(8192):
+                chunks.append(chunk)
+                size += len(chunk)
+                if size > MAX_BODY_BYTES:
+                    truncated = True
+                    break
+        return resp.status_code, b"".join(chunks), resp.headers, truncated
+
+    pool = futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        return pool.submit(_fetch).result(timeout=timeout_sec)
+    except futures.TimeoutError:
+        raise requests.Timeout("총 시한 %d초 초과" % timeout_sec)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _decode(body, headers):
@@ -88,8 +100,10 @@ def _l1_alive(site):
         )
         elapsed_ms = int((time.monotonic() - started) * 1000)
         ok = status == 200
+        partial = " (부분 수신)" if truncated else ""  # 잘림을 L1에서도 표기 (G7)
         return (
-            {"layer": "L1", "ok": ok, "detail": "HTTP %d · %dms" % (status, elapsed_ms)},
+            {"layer": "L1", "ok": ok,
+             "detail": "HTTP %d · %dms%s" % (status, elapsed_ms, partial)},
             body,
             headers,
             truncated,
@@ -112,11 +126,14 @@ def _l2_content(site, body, headers, truncated=False):
     missing = [m for m in markers if m not in text]
     if missing:
         if truncated:
-            # 부분 수신 본문에서 마커 부재를 "내용 없음"으로 단정하지 않는다 (N1)
+            # 부분 수신 본문에서 마커 부재를 "내용 없음"으로 단정하지 않는다 (N1).
+            # 분류는 WARN — 느리거나 큰 것뿐인 정상 사이트에 🔴을 주면 빨간 알림의
+            # 신뢰가 무너진다. 진짜 다운은 L1이 잡는다 (G6 트레이드오프 결정)
             return {
                 "layer": "L2",
                 "ok": False,
-                "detail": "본문 부분 수신(%d바이트, 시한/크기 초과) — 내용 검증 불가"
+                "warn": True,
+                "detail": "본문 부분 수신(%d바이트, 크기 상한 초과) — 내용 검증 불가"
                 % len(body),
             }
         return {
@@ -161,7 +178,7 @@ def _fetch_version(site, bust):
         if status != 200:
             return None, "HTTP %d" % status, ""
         if truncated:
-            return None, "부분 수신(시한/크기 초과)", ""
+            return None, "부분 수신(크기 상한 초과)", ""
         version = _decode(body, headers).strip().splitlines()[0].strip() if body.strip() else ""
         if not version or len(version) > VERSION_MAX_LEN:
             return None, "버전 파일 형식 이상(비었거나 %d자 초과)" % VERSION_MAX_LEN, ""

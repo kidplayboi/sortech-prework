@@ -3,10 +3,18 @@
 P1 구조 결함 3종(첫관측 무알림·status의 전이 소비·전송실패 소멸)과
 P1-1 인코딩 오탐, P3 파싱류가 되돌아오지 않는지 고정한다.
 """
+import contextlib
+import http.server
+import io
+import socketserver
+import threading
+import time
 import unittest
 from unittest import mock
 
-from watcher import checks, state as state_mod
+import requests
+
+from watcher import checks, notify, state as state_mod
 from watcher.cli import run_pass
 from watcher.config import validate_sites as checks_validate
 
@@ -56,7 +64,8 @@ class StateTransitionTest(unittest.TestCase):
         fixed = [{"layer": "L1", "ok": True, "detail": "HTTP 200 · 1ms"}]
         with mock.patch.object(checks, "check_site", return_value=fixed), \
              mock.patch.object(state_mod, "save_state") as save, \
-             mock.patch.object(state_mod, "observe") as observe:
+             mock.patch.object(state_mod, "observe") as observe, \
+             contextlib.redirect_stdout(io.StringIO()):
             run_pass(sites, st, alert=False)
         save.assert_not_called()
         observe.assert_not_called()
@@ -140,9 +149,10 @@ class IsolationTest(unittest.TestCase):
         fixed = [{"layer": "L1", "ok": True, "detail": "HTTP 200 · 1ms"}]
         with mock.patch.object(checks, "check_site", return_value=fixed), \
              mock.patch.object(state_mod, "observe", side_effect=[TypeError("boom"), {
-                 "alert": False, "status": "OK", "prev_notified": "OK",
-                 "duration_sec": 0, "reason": "r"}]) as observe, \
-             mock.patch.object(state_mod, "save_state"):
+                 "alert": False, "missed_reason": None, "status": "OK",
+                 "prev_notified": "OK", "duration_sec": 0, "reason": "r"}]) as observe, \
+             mock.patch.object(state_mod, "save_state"), \
+             contextlib.redirect_stdout(io.StringIO()):
             run_pass(sites, {}, alert=True, persist=False)
         self.assertEqual(observe.call_count, 2)
 
@@ -157,9 +167,105 @@ class IsolationTest(unittest.TestCase):
 class ConsoleFallbackTest(unittest.TestCase):
     def test_console_fallback_counts_as_delivered(self):
         """N4: 토큰 없는 콘솔 폴백이 False면 같은 알림이 영구 반복된다"""
-        from watcher import notify
-        with mock.patch.dict("os.environ", {}, clear=True):
+        with mock.patch.dict("os.environ", {}, clear=True), \
+             contextlib.redirect_stdout(io.StringIO()):
             self.assertTrue(notify.send("테스트"))
+
+
+class MissedTransientTest(unittest.TestCase):
+    def test_unsent_outage_reported_on_self_recovery(self):
+        """G1: 통보 전에 스스로 복구된 순단은 조용히 사라지지 않고 사후 보고된다"""
+        st = {}
+        state_mod.observe(st, "s", "FAIL", "L1 HTTP 503", confirm=1)  # 발송 실패 가정
+        obs = state_mod.observe(st, "s", "OK", "정상", confirm=1)
+        self.assertTrue(obs["alert"])
+        self.assertEqual(obs["missed_reason"], "L1 HTTP 503")
+
+    def test_notified_outage_recovery_is_normal_transition(self):
+        st = {}
+        state_mod.observe(st, "s", "FAIL", "r", confirm=1)
+        state_mod.mark_notified(st, "s")
+        obs = state_mod.observe(st, "s", "OK", "정상", confirm=1)
+        self.assertIsNone(obs["missed_reason"])
+        self.assertTrue(obs["alert"])
+
+
+class CheckExceptionTest(unittest.TestCase):
+    def test_check_exception_feeds_alert_path(self):
+        """G2: 체크 예외가 콘솔 한 줄로 끝나지 않고 FAIL 상태로 알림 경로를 탄다"""
+        sites = {"a": {"name": "A", "url": "u"}}
+        obs_result = {"alert": False, "missed_reason": None, "status": "FAIL",
+                      "prev_notified": "OK", "duration_sec": 0, "reason": "r"}
+        with mock.patch.object(checks, "check_site", side_effect=RuntimeError("boom")), \
+             mock.patch.object(state_mod, "observe", return_value=obs_result) as observe, \
+             mock.patch.object(state_mod, "save_state"), \
+             contextlib.redirect_stdout(io.StringIO()):
+            run_pass(sites, {}, alert=True, persist=False)
+        self.assertEqual(observe.call_args[0][2], "FAIL")
+        self.assertIn("체크 자체 실패", observe.call_args[0][3])
+
+
+class BadStateFileTest(unittest.TestCase):
+    def test_partial_schema_entry_is_reinitialized(self):
+        """G4: 부분 스키마 엔트리가 재초기화 가드를 우회하면 안 된다"""
+        st = {"s": {"observed": "FAIL"}}
+        obs = state_mod.observe(st, "s", "FAIL", "r", confirm=1)
+        self.assertTrue(obs["alert"])
+
+
+class _DemoHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.startswith("/big"):
+            data = b"y" * 5000
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        self.send_response(200)
+        self.send_header("Content-Length", "80000")
+        self.end_headers()
+        try:
+            for _ in range(12):  # 찔끔찔끔 — 청크 버퍼가 안 차게 (총 6초, 시한 2초보다 김)
+                self.wfile.write(b"x" * 800)
+                self.wfile.flush()
+                time.sleep(0.5)
+        except OSError:
+            pass
+
+    def log_message(self, *_args):
+        pass
+
+
+class BoundedGetIntegrationTest(unittest.TestCase):
+    """G8: truncated 분기를 직접 호출로만 검증하지 않고 실제 HTTP 경로로 검증"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _DemoHandler)
+        cls.server.daemon_threads = True  # 진행 중 핸들러가 shutdown을 붙잡지 않게
+        cls.port = cls.server.server_address[1]
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def test_trickle_server_hits_total_deadline(self):
+        """G3: 개별 read가 타임아웃을 안 넘는 찔끔 응답도 총 시한에 끊긴다"""
+        started = time.monotonic()
+        with self.assertRaises(requests.RequestException):
+            checks._bounded_get("http://127.0.0.1:%d/slow" % self.port, 2)
+        self.assertLess(time.monotonic() - started, 6)
+
+    def test_size_cap_marks_truncated(self):
+        with mock.patch.object(checks, "MAX_BODY_BYTES", 1000):
+            status, body, _headers, truncated = checks._bounded_get(
+                "http://127.0.0.1:%d/big" % self.port, 5
+            )
+        self.assertEqual(status, 200)
+        self.assertTrue(truncated)
+        self.assertGreaterEqual(len(body), 1000)
 
 
 class BustUrlTest(unittest.TestCase):
