@@ -44,8 +44,8 @@ def _bounded_get(url, timeout_sec):
     - 총 시한: 데몬 워커 스레드 + join(timeout)으로 강제한다. 인라인 데드라인 검사는
       iter_content가 청크를 채울 때까지 블록해 시한을 수 배 초과할 수 있음이
       실측됐다 (3차 G3 — timeout 3초 설정에 실소요 11.6초). 시한 초과 시
-      requests.Timeout을 던지고, 메인에서 resp.close()로 블록된 read를 깨워
-      워커·소켓을 즉시 회수한다 (4차 H-A — 누수·프로세스 미종료 방지).
+      requests.Timeout을 즉시 던진다. 워커 회수는 close() 위임(best-effort) +
+      워커 자신의 read timeout(보장)의 이중 구조다 (4차 H-A·5차 K-A).
     - truncated=True는 '크기 상한으로 잘린 부분 본문'을 뜻한다 — 이 신호 없이
       부분 본문을 정상 응답처럼 반환하면 멀쩡한 페이지가 오탐된다 (2차 N1 교정).
     """
@@ -78,8 +78,14 @@ def _bounded_get(url, timeout_sec):
     if worker.is_alive():
         resp = holder.get("resp")
         if resp is not None:
-            resp.close()  # 블록된 read를 깨워 워커를 곧바로 회수
-        worker.join(2)
+            # close()는 워커의 in-flight read가 끝나기를 기다리며 수 초 블록할 수
+            # 있음이 계측됐다 (5차 게이트 K-A — 메인에서 동기 호출하면 시한이 다시
+            # 깨진다). 데몬 스레드에 위임해 메인은 즉시 복귀하고, 회수는 best-effort로
+            # 앞당긴다. 최종 회수 보장은 워커 자신의 read timeout.
+            threading.Thread(target=resp.close, daemon=True).start()
+        # 알려진 한계 (K-B): 응답 헤더 단계에서 멈추는 병적 서버는 requests.get()이
+        # 반환하지 않아 holder가 비고, 닫을 핸들 자체가 없다. 워커는 데몬이라
+        # 프로세스 종료는 막지 않으며, read timeout이 걸리는 시점에 자연 회수된다.
         raise requests.Timeout("총 시한 %d초 초과" % timeout_sec)
     if "exc" in result:
         raise result["exc"]

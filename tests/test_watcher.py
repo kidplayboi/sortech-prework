@@ -196,6 +196,15 @@ class MissedTransientTest(unittest.TestCase):
         self.assertIsNone(obs["missed_reason"])
         self.assertTrue(obs["alert"])
 
+    def test_missed_recovery_is_not_reported_as_outage(self):
+        """K-D: notified=FAIL 중 놓친 것은 '복구'다 — '미통보 장애'로 오보하면 안 된다"""
+        st = {}
+        state_mod.observe(st, "s", "FAIL", "r", confirm=1)
+        state_mod.mark_notified(st, "s")
+        state_mod.observe(st, "s", "OK", "정상", confirm=1)  # 회복 알림 전송 실패 가정
+        obs = state_mod.observe(st, "s", "FAIL", "r2", confirm=1)  # 다시 장애
+        self.assertIsNone(obs["missed_reason"])
+
     def test_missed_report_retries_until_delivered(self):
         """H-C: 사후 보고도 전달 성공까지 유지 — clear_missed 후에만 소거"""
         st = {}
@@ -206,6 +215,27 @@ class MissedTransientTest(unittest.TestCase):
         state_mod.clear_missed(st, "s")
         obs = state_mod.observe(st, "s", "OK", "정상", confirm=1)
         self.assertIsNone(obs["missed_reason"])
+
+
+class AlertOrderTest(unittest.TestCase):
+    def test_current_outage_not_preempted_by_missed_report(self):
+        """K-C: 과거 순단 사후 보고가 현재 진행 중인 🔴을 선점하면 안 된다"""
+        sites = {"a": {"name": "A", "url": "u"}}
+        obs_result = {"alert": True, "missed_reason": "L1 순단", "status": "FAIL",
+                      "prev_notified": "OK", "duration_sec": 0, "reason": "지금 장애"}
+        sent = []
+        fixed = [{"layer": "L1", "ok": False, "detail": "지금 장애"}]
+        with mock.patch.object(checks, "check_site", return_value=fixed), \
+             mock.patch.object(state_mod, "observe", return_value=obs_result), \
+             mock.patch.object(state_mod, "mark_notified"), \
+             mock.patch.object(state_mod, "clear_missed"), \
+             mock.patch.object(state_mod, "save_state"), \
+             mock.patch.object(notify, "send", side_effect=lambda t: bool(sent.append(t)) or True), \
+             contextlib.redirect_stdout(io.StringIO()):
+            run_pass(sites, {}, alert=True, persist=False)
+        self.assertEqual(len(sent), 2)
+        self.assertIn("이상 감지", sent[0])   # 현재 장애 먼저
+        self.assertIn("순단 후", sent[1])
 
 
 class CheckExceptionTest(unittest.TestCase):

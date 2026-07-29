@@ -16,6 +16,9 @@ def send(text):
         print("[알림-콘솔] %s" % text)
         return True
     try:
+        # timeout=10은 총 시한이 아니라 read timeout이다 (K-F). checks.py처럼 스레드
+        # 데드라인을 두지 않은 건 의도된 선택 — 상대가 통제된 단일 API이고 응답이
+        # 작아 드리블 위험이 낮으며, 실패는 상태 유지로 다음 패스에서 재시도된다.
         resp = requests.post(
             "https://api.telegram.org/bot%s/sendMessage" % token,
             json={"chat_id": chat_id, "text": text},

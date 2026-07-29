@@ -78,10 +78,12 @@ def observe(state, site_key, status, reason, confirm=1):
     if entry["streak"] >= max(1, confirm) and entry["confirmed"] != status:
         prev_confirmed = entry["confirmed"]
         prev_since = entry["confirmed_since"]
-        # 미통보 상태에서 원상 복구되는 순간이면, 그 순단을 조용히 버리지 않고
-        # 전달 성공까지 유지되는 사후 보고 소재로 남긴다 (G1·H-C: 발송 실패 시 재시도)
+        # 미통보 '장애'(OK에서 이탈했다 복귀)만 사후 보고 대상이다 (G1·H-C·K-D).
+        # notified가 이미 FAIL인 상태에서 놓친 것은 '복구'라, "미통보 장애 있었음"
+        # 문구로 내보내면 정반대 오보가 된다 — 그 경우 복구가 지속되면 정상 회복
+        # 알림이 어차피 나가므로 여기서 다루지 않는다.
         if prev_confirmed is not None and prev_confirmed != entry["notified"] \
-                and status == entry["notified"]:
+                and status == entry["notified"] and entry["notified"] == "OK":
             entry["pending_missed"] = entry["confirmed_reason"]
         entry["confirmed"] = status
         entry["confirmed_since"] = now
@@ -127,6 +129,11 @@ def _entry_broken(entry):
     for field in ("observed", "confirmed"):
         if entry[field] is not None and not isinstance(entry[field], str):
             return True
+    if entry["streak"] < 0:  # 음수 streak은 확정을 여러 패스 억제한다 (K-E)
+        return True
     if entry["confirmed_since"] is not None and not isinstance(entry["confirmed_since"], int):
         return True
+    for optional_field, expected in (("last_change_duration", int), ("pending_missed", str)):
+        if optional_field in entry and not isinstance(entry[optional_field], expected):
+            return True
     return not (isinstance(entry["reason"], str) and isinstance(entry["confirmed_reason"], str))

@@ -36,11 +36,9 @@ def run_pass(sites, st, alert, persist=True):
             obs = state_mod.observe(
                 st, key, status, reason, confirm=site.get("confirm_checks", 1)
             )
-            if obs.get("missed_reason"):
-                if notify.send(notify.fmt_missed(
-                        site.get("name", key), obs["missed_reason"], obs["duration_sec"])):
-                    state_mod.clear_missed(st, key)  # 전달 성공 시에만 소거 — 실패면 재시도 (H-C)
-            elif obs["alert"]:
+            # 현재 진행 중인 장애를 먼저 — 과거 순단의 사후 보고가 지금의 🔴을
+            # 선점하면 안 된다 (K-C: elif 구조였을 때 1인터벌 지연·once 1회 누락)
+            if obs["status"] is not None and obs["status"] != obs["prev_notified"]:
                 sent = notify.send(
                     notify.fmt_transition(
                         site.get("name", key), obs["status"], obs["reason"],
@@ -49,6 +47,10 @@ def run_pass(sites, st, alert, persist=True):
                 )
                 if sent:
                     state_mod.mark_notified(st, key)
+            if obs.get("missed_reason"):
+                if notify.send(notify.fmt_missed(
+                        site.get("name", key), obs["missed_reason"], obs["duration_sec"])):
+                    state_mod.clear_missed(st, key)  # 전달 성공 시에만 소거 — 실패면 재시도 (H-C)
         except Exception as exc:
             print("%s [%s] ⚠️ 상태 처리 실패: %s" % (_now(), site.get("name", key), type(exc).__name__))
     if alert and persist:
