@@ -84,7 +84,12 @@ def observe(state, site_key, status, reason, confirm=1):
         # 알림이 어차피 나가므로 여기서 다루지 않는다.
         if prev_confirmed is not None and prev_confirmed != entry["notified"] \
                 and status == entry["notified"] and entry["notified"] == "OK":
-            entry["pending_missed"] = entry["confirmed_reason"]
+            # 이미 대기 중인 사후 보고가 있으면 최악(FAIL)만 덮어쓴다 — 중간에 낀
+            # WARN이 미통보 FAIL의 사유를 지우지 않게 (M-C). 지속시간도 이 시점에
+            # 스냅샷 — 공유 필드를 나중에 읽으면 다른 전이의 값이 끼어든다 (M-H)
+            if "pending_missed" not in entry or prev_confirmed == "FAIL":
+                entry["pending_missed"] = entry["confirmed_reason"]
+                entry["pending_missed_duration"] = now - prev_since if prev_since else 0
         entry["confirmed"] = status
         entry["confirmed_since"] = now
         # 확정 시점의 사유를 따로 보관 — 발송 재시도 중 다른 관측의 사유가
@@ -99,6 +104,7 @@ def observe(state, site_key, status, reason, confirm=1):
     return {
         "alert": needs_alert or missed_reason is not None,
         "missed_reason": missed_reason,
+        "missed_duration": entry.get("pending_missed_duration", 0),
         "status": entry["confirmed"],
         "prev_notified": entry["notified"],
         "duration_sec": entry.get("last_change_duration", 0),
@@ -115,6 +121,7 @@ def mark_notified(state, site_key):
 def clear_missed(state, site_key):
     """순단 사후 보고가 실제로 전달됐을 때만 호출한다 (H-C)."""
     state[site_key].pop("pending_missed", None)
+    state[site_key].pop("pending_missed_duration", None)
 
 
 def _entry_broken(entry):
@@ -133,7 +140,8 @@ def _entry_broken(entry):
         return True
     if entry["confirmed_since"] is not None and not isinstance(entry["confirmed_since"], int):
         return True
-    for optional_field, expected in (("last_change_duration", int), ("pending_missed", str)):
+    for optional_field, expected in (("last_change_duration", int), ("pending_missed", str),
+                                     ("pending_missed_duration", int)):
         if optional_field in entry and not isinstance(entry[optional_field], expected):
             return True
     return not (isinstance(entry["reason"], str) and isinstance(entry["confirmed_reason"], str))

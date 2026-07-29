@@ -29,9 +29,18 @@ def load_env():
 
 
 def load_sites():
+    """state.json과 같은 클래스의 방어 — 설정 오타가 트레이스백으로 죽지 않게 (M-B)"""
     if not SITES_PATH.exists():
         return {}
-    return json.loads(SITES_PATH.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(SITES_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        print("[설정 오류] sites.json 파싱 실패(%s)" % type(exc).__name__)
+        return {}
+    if not isinstance(data, dict):
+        print("[설정 오류] sites.json 최상위는 객체여야 합니다")
+        return {}
+    return data
 
 
 def validate_sites(sites):
@@ -47,10 +56,14 @@ def validate_sites(sites):
             errors.append("%s: 객체가 아님" % key)
             bad_keys.add(key)
             continue
-        for field in ("name", "url"):
-            if not site.get(field):
-                errors.append("%s: 필수 항목 '%s' 없음" % (key, field))
-                bad_keys.add(key)
+        name = site.get("name")
+        if not name or not isinstance(name, str):
+            errors.append("%s: name은 비어있지 않은 문자열이어야 함" % key)
+            bad_keys.add(key)
+        url = site.get("url")
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            errors.append("%s: url은 http(s):// 로 시작하는 문자열이어야 함" % key)
+            bad_keys.add(key)
         markers = site.get("markers")
         if markers is not None and (
             not isinstance(markers, list)

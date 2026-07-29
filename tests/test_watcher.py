@@ -158,7 +158,7 @@ class IsolationTest(unittest.TestCase):
 
     def test_validate_sites_rejects_wrong_types(self):
         errors, _warnings, bad = checks_validate(
-            {"s": {"name": "n", "url": "u", "markers": "데모샵", "confirm_checks": "2"}}
+            {"s": {"name": "n", "url": "http://x", "markers": "데모샵", "confirm_checks": "2"}}
         )
         self.assertEqual(bad, {"s"})
         self.assertEqual(len(errors), 2)
@@ -166,7 +166,7 @@ class IsolationTest(unittest.TestCase):
     def test_validate_sites_rejects_empty_marker(self):
         """H-B: 빈 문자열 마커는 모든 페이지를 통과시켜 L2를 무음 무력화한다"""
         _errors, _warnings, bad = checks_validate(
-            {"s": {"name": "n", "url": "u", "markers": [""]}}
+            {"s": {"name": "n", "url": "http://x", "markers": [""]}}
         )
         self.assertEqual(bad, {"s"})
 
@@ -235,7 +235,7 @@ class AlertOrderTest(unittest.TestCase):
             run_pass(sites, {}, alert=True, persist=False)
         self.assertEqual(len(sent), 2)
         self.assertIn("이상 감지", sent[0])   # 현재 장애 먼저
-        self.assertIn("순단 후", sent[1])
+        self.assertIn("사후 보고", sent[1])
 
 
 class CheckExceptionTest(unittest.TestCase):
@@ -299,19 +299,23 @@ class BoundedGetIntegrationTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.server.shutdown()
 
+    @staticmethod
+    def _watcher_threads():
+        return [t for t in threading.enumerate() if t.name.startswith("watcher-")]
+
     def test_trickle_server_hits_total_deadline(self):
         """G3: 개별 read가 타임아웃을 안 넘는 찔끔 응답도 총 시한에 끊긴다"""
-        baseline = threading.active_count()
         started = time.monotonic()
         with self.assertRaises(requests.RequestException):
             checks._bounded_get("http://127.0.0.1:%d/slow" % self.port, 2)
         self.assertLess(time.monotonic() - started, 6)
         # H-A/H-F: 반환 시각만 재면 안 된다 — 워커·소켓이 실제로 회수되는지 검증.
-        # (이전 구현은 시한마다 스레드가 누적돼 프로세스가 99.7초 생존했다)
-        deadline = time.monotonic() + 4
-        while threading.active_count() > baseline and time.monotonic() < deadline:
+        # 전역 active_count 비교는 무관 스레드에 오염돼 flaky했다(6차 M-A) —
+        # 워커에 이름표(watcher-*)를 붙여 그 스레드만 추적한다.
+        deadline = time.monotonic() + 8
+        while self._watcher_threads() and time.monotonic() < deadline:
             time.sleep(0.1)
-        self.assertLessEqual(threading.active_count(), baseline)
+        self.assertEqual(self._watcher_threads(), [])
 
     def test_size_cap_marks_truncated(self):
         with mock.patch.object(checks, "MAX_BODY_BYTES", 1000):

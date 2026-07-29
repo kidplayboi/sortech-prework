@@ -35,9 +35,10 @@ def send(text):
 
 
 def fmt_missed(site_name, missed_reason, duration_sec):
-    """통보 전에 스스로 복구된 순단 — 조용히 버리지 않고 사후 1회 보고 (G1)"""
+    """통보 전에 스스로 복구된 순단 — 조용히 버리지 않고 사후 1회 보고 (G1).
+    '현재 상태 아님'을 명시 — 같은 패스의 🔴 직후 도착해도 혼동 없게 (M-D)."""
     tail = " (%s 지속)" % _fmt_duration(duration_sec) if duration_sec > 0 else ""
-    return "🟠 [%s] 순단 후 자가 복구 — 미통보 장애 있었음: %s%s" % (
+    return "🟠 [%s] 이전 순단 사후 보고(현재 상태 아님) — 미통보 장애 있었음: %s%s" % (
         site_name, missed_reason, tail)
 
 

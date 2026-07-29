@@ -56,7 +56,7 @@ def _bounded_get(url, timeout_sec):
             resp = requests.get(
                 url, timeout=(5, timeout_sec), stream=True, headers={"User-Agent": UA}
             )
-            holder["resp"] = resp  # 시한 초과 시 메인 스레드가 close()로 깨울 수 있게 공유
+            holder["resp"] = resp  # 시한 초과 시 정리 위임 스레드가 close()할 수 있게 공유
             chunks, size, truncated = [], 0, False
             with resp:  # 예외 경로에서도 커넥션 반환 (N11)
                 for chunk in resp.iter_content(8192):
@@ -71,8 +71,8 @@ def _bounded_get(url, timeout_sec):
 
     # ThreadPoolExecutor 금지 — 비데몬 워커가 atexit join으로 프로세스 종료를
     # 응답이 끝날 때까지 막고(99.7초 실측), 시한 초과마다 스레드·소켓이 누적된다
-    # (4차 게이트 H-A). 데몬 스레드 + 시한 초과 시 resp.close()로 즉시 정리한다.
-    worker = threading.Thread(target=_fetch, daemon=True)
+    # (4차 게이트 H-A). 데몬 스레드 + 시한 초과 시 best-effort 회수한다.
+    worker = threading.Thread(target=_fetch, daemon=True, name="watcher-fetch")
     worker.start()
     worker.join(timeout_sec)
     if worker.is_alive():
@@ -82,7 +82,7 @@ def _bounded_get(url, timeout_sec):
             # 있음이 계측됐다 (5차 게이트 K-A — 메인에서 동기 호출하면 시한이 다시
             # 깨진다). 데몬 스레드에 위임해 메인은 즉시 복귀하고, 회수는 best-effort로
             # 앞당긴다. 최종 회수 보장은 워커 자신의 read timeout.
-            threading.Thread(target=resp.close, daemon=True).start()
+            threading.Thread(target=resp.close, daemon=True, name="watcher-close").start()
         # 알려진 한계 (K-B): 응답 헤더 단계에서 멈추는 병적 서버는 requests.get()이
         # 반환하지 않아 holder가 비고, 닫을 핸들 자체가 없다. 워커는 데몬이라
         # 프로세스 종료는 막지 않으며, read timeout이 걸리는 시점에 자연 회수된다.

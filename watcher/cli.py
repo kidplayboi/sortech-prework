@@ -49,7 +49,8 @@ def run_pass(sites, st, alert, persist=True):
                     state_mod.mark_notified(st, key)
             if obs.get("missed_reason"):
                 if notify.send(notify.fmt_missed(
-                        site.get("name", key), obs["missed_reason"], obs["duration_sec"])):
+                        site.get("name", key), obs["missed_reason"],
+                        obs.get("missed_duration", 0))):
                     state_mod.clear_missed(st, key)  # 전달 성공 시에만 소거 — 실패면 재시도 (H-C)
         except Exception as exc:
             print("%s [%s] ⚠️ 상태 처리 실패: %s" % (_now(), site.get("name", key), type(exc).__name__))
@@ -75,6 +76,9 @@ def cmd_watch(sites, args):
         while True:
             run_pass(sites, st, alert=True)
             next_run += interval
+            if next_run < time.monotonic():
+                # 절전 복귀·긴 패스 뒤 밀린 주기를 연속 실행으로 몰아치지 않는다 (M-F)
+                next_run = time.monotonic() + interval
             time.sleep(max(0, next_run - time.monotonic()))
     except KeyboardInterrupt:
         print("\n순찰 종료")
