@@ -72,8 +72,11 @@ def validate_sites(sites):
             errors.append("%s: markers는 비어있지 않은 문자열 리스트여야 함" % key)
             bad_keys.add(key)
         version_url = site.get("version_url")
-        if version_url is not None and not isinstance(version_url, str):
-            errors.append("%s: version_url은 문자열이어야 함" % key)
+        if version_url is not None and (
+            not isinstance(version_url, str)
+            or not version_url.startswith(("http://", "https://"))
+        ):  # url과 같은 기준 — 같은 함수 안에서 같은 종류 필드를 다르게 다루지 않는다 (N-D)
+            errors.append("%s: version_url은 http(s):// 로 시작하는 문자열이어야 함" % key)
             bad_keys.add(key)
         for field in ("confirm_checks", "timeout_sec"):
             value = site.get(field)

@@ -76,20 +76,23 @@ def observe(state, site_key, status, reason, confirm=1):
     entry["reason"] = reason
 
     if entry["streak"] >= max(1, confirm) and entry["confirmed"] != status:
-        prev_confirmed = entry["confirmed"]
         prev_since = entry["confirmed_since"]
         # 미통보 '장애'(OK에서 이탈했다 복귀)만 사후 보고 대상이다 (G1·H-C·K-D).
-        # notified가 이미 FAIL인 상태에서 놓친 것은 '복구'라, "미통보 장애 있었음"
-        # 문구로 내보내면 정반대 오보가 된다 — 그 경우 복구가 지속되면 정상 회복
-        # 알림이 어차피 나가므로 여기서 다루지 않는다.
-        if prev_confirmed is not None and prev_confirmed != entry["notified"] \
-                and status == entry["notified"] and entry["notified"] == "OK":
-            # 이미 대기 중인 사후 보고가 있으면 최악(FAIL)만 덮어쓴다 — 중간에 낀
-            # WARN이 미통보 FAIL의 사유를 지우지 않게 (M-C). 지속시간도 이 시점에
-            # 스냅샷 — 공유 필드를 나중에 읽으면 다른 전이의 값이 끼어든다 (M-H)
-            if "pending_missed" not in entry or prev_confirmed == "FAIL":
-                entry["pending_missed"] = entry["confirmed_reason"]
-                entry["pending_missed_duration"] = now - prev_since if prev_since else 0
+        # 복귀 순간의 confirmed_reason만 쓰면 중간에 낀 WARN이 미통보 FAIL의 사유를
+        # 지운다(7차 N-C — 1차 가드는 이 시퀀스를 못 막았음) → 이탈 구간 동안
+        # '최악' 사유를 별도 누적했다가 복귀 시 이관한다.
+        if entry["notified"] == "OK" and status != "OK":
+            if "unnotified_worst" not in entry or status == "FAIL":
+                entry["unnotified_worst"] = reason
+                entry["unnotified_worst_fail"] = status == "FAIL"
+            entry.setdefault("deviation_since", now)
+        elif entry["notified"] == "OK" and status == "OK" and "unnotified_worst" in entry:
+            # 이미 대기 중인 사후 보고는 최악(FAIL) 사유일 때만 덮어쓴다 (M-C).
+            # 지속시간은 이 시점에 스냅샷 (M-H)
+            if "pending_missed" not in entry or entry.get("unnotified_worst_fail"):
+                entry["pending_missed"] = entry["unnotified_worst"]
+                entry["pending_missed_duration"] = now - entry.get("deviation_since", now)
+            _clear_deviation(entry)
         entry["confirmed"] = status
         entry["confirmed_since"] = now
         # 확정 시점의 사유를 따로 보관 — 발송 재시도 중 다른 관측의 사유가
@@ -116,6 +119,14 @@ def mark_notified(state, site_key):
     """발송이 실제로 성공했을 때만 호출한다."""
     entry = state[site_key]
     entry["notified"] = entry["confirmed"]
+    # 이탈이 통보됐으면 '미통보 최악' 추적은 종료 — 이후 복귀는 정상 회복 알림으로 나간다
+    _clear_deviation(entry)
+
+
+def _clear_deviation(entry):
+    entry.pop("unnotified_worst", None)
+    entry.pop("unnotified_worst_fail", None)
+    entry.pop("deviation_since", None)
 
 
 def clear_missed(state, site_key):
@@ -141,7 +152,9 @@ def _entry_broken(entry):
     if entry["confirmed_since"] is not None and not isinstance(entry["confirmed_since"], int):
         return True
     for optional_field, expected in (("last_change_duration", int), ("pending_missed", str),
-                                     ("pending_missed_duration", int)):
+                                     ("pending_missed_duration", int),
+                                     ("unnotified_worst", str), ("unnotified_worst_fail", bool),
+                                     ("deviation_since", int)):
         if optional_field in entry and not isinstance(entry[optional_field], expected):
             return True
     return not (isinstance(entry["reason"], str) and isinstance(entry["confirmed_reason"], str))

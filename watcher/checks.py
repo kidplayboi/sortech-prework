@@ -41,15 +41,18 @@ def check_site(site):
 def _bounded_get(url, timeout_sec):
     """총 시한·크기 상한이 있는 GET. 반환: (status_code, body_bytes, headers, truncated)
 
-    - 총 시한: 데몬 워커 스레드 + join(timeout)으로 강제한다. 인라인 데드라인 검사는
-      iter_content가 청크를 채울 때까지 블록해 시한을 수 배 초과할 수 있음이
-      실측됐다 (3차 G3 — timeout 3초 설정에 실소요 11.6초). 시한 초과 시
-      requests.Timeout을 즉시 던진다. 워커 회수는 close() 위임(best-effort) +
-      워커 자신의 read timeout(보장)의 이중 구조다 (4차 H-A·5차 K-A).
+    - 총 시한: 데몬 워커 스레드 + join(timeout)으로 강제한다. 시한 초과 시 호출자는
+      requests.Timeout을 즉시 받는다. 워커 회수는 3중 구조 — close() 위임(best-effort)
+      + 무응답 시 read timeout + 데이터가 흐르는 동안엔 청크마다 인라인 데드라인
+      자가 종료. 단, 바이트 단위로 계속 흘리는 병적 트리클은 단일 read가 길어져
+      회수가 지연될 수 있다(2MB 상한으로 유한하며 데몬이라 프로세스 종료는 막지
+      않는다 — 7차 N-A, README '알려진 한계' 참조).
     - truncated=True는 '크기 상한으로 잘린 부분 본문'을 뜻한다 — 이 신호 없이
       부분 본문을 정상 응답처럼 반환하면 멀쩡한 페이지가 오탐된다 (2차 N1 교정).
     """
     holder, result = {}, {}
+
+    deadline = time.monotonic() + timeout_sec
 
     def _fetch():
         try:
@@ -59,7 +62,11 @@ def _bounded_get(url, timeout_sec):
             holder["resp"] = resp  # 시한 초과 시 정리 위임 스레드가 close()할 수 있게 공유
             chunks, size, truncated = [], 0, False
             with resp:  # 예외 경로에서도 커넥션 반환 (N11)
-                for chunk in resp.iter_content(8192):
+                for chunk in resp.iter_content(1024):
+                    if time.monotonic() > deadline:
+                        # 데이터가 흐르는 트리클에서는 read timeout이 안 걸린다 —
+                        # 워커가 스스로 종료해 누수를 막는다 (7차 N-A)
+                        raise requests.Timeout("총 시한 초과(워커 자가 종료)")
                     chunks.append(chunk)
                     size += len(chunk)
                     if size > MAX_BODY_BYTES:

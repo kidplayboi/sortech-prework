@@ -205,6 +205,14 @@ class MissedTransientTest(unittest.TestCase):
         obs = state_mod.observe(st, "s", "FAIL", "r2", confirm=1)  # 다시 장애
         self.assertIsNone(obs["missed_reason"])
 
+    def test_worst_unnotified_reason_preserved_through_warn(self):
+        """N-C: OK→FAIL(미발송)→WARN(미발송)→OK — 사후 보고는 최악(FAIL) 사유를 인용해야 한다"""
+        st = {}
+        state_mod.observe(st, "s", "FAIL", "L1 HTTP 503", confirm=1)
+        state_mod.observe(st, "s", "WARN", "L3 버전 불일치", confirm=1)
+        obs = state_mod.observe(st, "s", "OK", "정상", confirm=1)
+        self.assertEqual(obs["missed_reason"], "L1 HTTP 503")
+
     def test_missed_report_retries_until_delivered(self):
         """H-C: 사후 보고도 전달 성공까지 유지 — clear_missed 후에만 소거"""
         st = {}
