@@ -8,9 +8,9 @@ L3 배포반영 — 원본(캐시 우회)과 사용자 화면(캐시 경유)의 
 모든 요청은 총 시한·크기 상한이 있다 — 찔끔찔끔 응답하는 서버 하나가
 순차 루프 전체를 점유하는 것을 막는다 (Codex 게이트 P2-7).
 """
+import threading
 import time
 import urllib.parse
-from concurrent import futures
 
 import requests
 
@@ -41,34 +41,49 @@ def check_site(site):
 def _bounded_get(url, timeout_sec):
     """총 시한·크기 상한이 있는 GET. 반환: (status_code, body_bytes, headers, truncated)
 
-    - 총 시한: 별도 스레드 + future 타임아웃으로 강제한다. 인라인 데드라인 검사는
+    - 총 시한: 데몬 워커 스레드 + join(timeout)으로 강제한다. 인라인 데드라인 검사는
       iter_content가 청크를 채울 때까지 블록해 시한을 수 배 초과할 수 있음이
-      실측됐다 (3차 게이트 G3 — timeout 3초 설정에 실소요 11.6초). 시한 초과 시
-      requests.Timeout을 던지며, 백그라운드 스레드는 read timeout까지 스스로 정리된다.
+      실측됐다 (3차 G3 — timeout 3초 설정에 실소요 11.6초). 시한 초과 시
+      requests.Timeout을 던지고, 메인에서 resp.close()로 블록된 read를 깨워
+      워커·소켓을 즉시 회수한다 (4차 H-A — 누수·프로세스 미종료 방지).
     - truncated=True는 '크기 상한으로 잘린 부분 본문'을 뜻한다 — 이 신호 없이
       부분 본문을 정상 응답처럼 반환하면 멀쩡한 페이지가 오탐된다 (2차 N1 교정).
     """
-    def _fetch():
-        resp = requests.get(
-            url, timeout=(5, timeout_sec), stream=True, headers={"User-Agent": UA}
-        )
-        chunks, size, truncated = [], 0, False
-        with resp:  # 예외 경로에서도 커넥션 반환 (N11)
-            for chunk in resp.iter_content(8192):
-                chunks.append(chunk)
-                size += len(chunk)
-                if size > MAX_BODY_BYTES:
-                    truncated = True
-                    break
-        return resp.status_code, b"".join(chunks), resp.headers, truncated
+    holder, result = {}, {}
 
-    pool = futures.ThreadPoolExecutor(max_workers=1)
-    try:
-        return pool.submit(_fetch).result(timeout=timeout_sec)
-    except futures.TimeoutError:
+    def _fetch():
+        try:
+            resp = requests.get(
+                url, timeout=(5, timeout_sec), stream=True, headers={"User-Agent": UA}
+            )
+            holder["resp"] = resp  # 시한 초과 시 메인 스레드가 close()로 깨울 수 있게 공유
+            chunks, size, truncated = [], 0, False
+            with resp:  # 예외 경로에서도 커넥션 반환 (N11)
+                for chunk in resp.iter_content(8192):
+                    chunks.append(chunk)
+                    size += len(chunk)
+                    if size > MAX_BODY_BYTES:
+                        truncated = True
+                        break
+            result["value"] = (resp.status_code, b"".join(chunks), resp.headers, truncated)
+        except Exception as exc:
+            result["exc"] = exc
+
+    # ThreadPoolExecutor 금지 — 비데몬 워커가 atexit join으로 프로세스 종료를
+    # 응답이 끝날 때까지 막고(99.7초 실측), 시한 초과마다 스레드·소켓이 누적된다
+    # (4차 게이트 H-A). 데몬 스레드 + 시한 초과 시 resp.close()로 즉시 정리한다.
+    worker = threading.Thread(target=_fetch, daemon=True)
+    worker.start()
+    worker.join(timeout_sec)
+    if worker.is_alive():
+        resp = holder.get("resp")
+        if resp is not None:
+            resp.close()  # 블록된 read를 깨워 워커를 곧바로 회수
+        worker.join(2)
         raise requests.Timeout("총 시한 %d초 초과" % timeout_sec)
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
+    if "exc" in result:
+        raise result["exc"]
+    return result["value"]
 
 
 def _decode(body, headers):
@@ -127,8 +142,9 @@ def _l2_content(site, body, headers, truncated=False):
     if missing:
         if truncated:
             # 부분 수신 본문에서 마커 부재를 "내용 없음"으로 단정하지 않는다 (N1).
-            # 분류는 WARN — 느리거나 큰 것뿐인 정상 사이트에 🔴을 주면 빨간 알림의
-            # 신뢰가 무너진다. 진짜 다운은 L1이 잡는다 (G6 트레이드오프 결정)
+            # 분류는 WARN — '크기 상한으로 잘렸을 뿐'인 사이트에 🔴을 주면 빨간
+            # 알림의 신뢰가 무너진다. 시한 초과는 여기 오지 않고 L1 요청 실패(FAIL)로
+            # 처리된다 — 느려서 시한을 넘기는 건 장애로 본다 (G6·H-E 경계 명시)
             return {
                 "layer": "L2",
                 "ok": False,

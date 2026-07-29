@@ -61,7 +61,7 @@ def observe(state, site_key, status, reason, confirm=1):
     반환 dict: alert(발송 필요), status(확정 상태), prev_notified, duration_sec, reason
     """
     entry = state.setdefault(site_key, {})
-    if not _REQUIRED_KEYS <= set(entry):  # 신규·구버전·부분 스키마 → 완전 재초기화 (N6·G4)
+    if _entry_broken(entry):  # 신규·구버전·부분 스키마·값 타입 손상 → 완전 재초기화 (N6·G4·H-D)
         entry.clear()
         entry.update({"observed": None, "streak": 0, "confirmed": None,
                       "confirmed_since": None, "notified": "OK", "reason": "",
@@ -75,15 +75,14 @@ def observe(state, site_key, status, reason, confirm=1):
         entry["streak"] = 1
     entry["reason"] = reason
 
-    missed_reason = None
     if entry["streak"] >= max(1, confirm) and entry["confirmed"] != status:
         prev_confirmed = entry["confirmed"]
         prev_since = entry["confirmed_since"]
         # 미통보 상태에서 원상 복구되는 순간이면, 그 순단을 조용히 버리지 않고
-        # "순단 후 자가 복구" 1회 통보 소재로 넘긴다 (G1)
+        # 전달 성공까지 유지되는 사후 보고 소재로 남긴다 (G1·H-C: 발송 실패 시 재시도)
         if prev_confirmed is not None and prev_confirmed != entry["notified"] \
                 and status == entry["notified"]:
-            missed_reason = entry["confirmed_reason"]
+            entry["pending_missed"] = entry["confirmed_reason"]
         entry["confirmed"] = status
         entry["confirmed_since"] = now
         # 확정 시점의 사유를 따로 보관 — 발송 재시도 중 다른 관측의 사유가
@@ -94,6 +93,7 @@ def observe(state, site_key, status, reason, confirm=1):
     needs_alert = (
         entry["confirmed"] is not None and entry["confirmed"] != entry["notified"]
     )
+    missed_reason = entry.get("pending_missed")
     return {
         "alert": needs_alert or missed_reason is not None,
         "missed_reason": missed_reason,
@@ -108,3 +108,25 @@ def mark_notified(state, site_key):
     """발송이 실제로 성공했을 때만 호출한다."""
     entry = state[site_key]
     entry["notified"] = entry["confirmed"]
+
+
+def clear_missed(state, site_key):
+    """순단 사후 보고가 실제로 전달됐을 때만 호출한다 (H-C)."""
+    state[site_key].pop("pending_missed", None)
+
+
+def _entry_broken(entry):
+    """키 존재 + 값 타입까지 검사 — 타입 손상 엔트리가 매 패스 예외로 한 사이트를
+    영구 무력화하는 것 방지 (H-D)."""
+    if not _REQUIRED_KEYS <= set(entry):
+        return True
+    if not isinstance(entry["streak"], int) or isinstance(entry["streak"], bool):
+        return True
+    if not isinstance(entry["notified"], str):
+        return True
+    for field in ("observed", "confirmed"):
+        if entry[field] is not None and not isinstance(entry[field], str):
+            return True
+    if entry["confirmed_since"] is not None and not isinstance(entry["confirmed_since"], int):
+        return True
+    return not (isinstance(entry["reason"], str) and isinstance(entry["confirmed_reason"], str))

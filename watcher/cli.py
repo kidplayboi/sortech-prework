@@ -37,8 +37,9 @@ def run_pass(sites, st, alert, persist=True):
                 st, key, status, reason, confirm=site.get("confirm_checks", 1)
             )
             if obs.get("missed_reason"):
-                notify.send(notify.fmt_missed(
-                    site.get("name", key), obs["missed_reason"], obs["duration_sec"]))
+                if notify.send(notify.fmt_missed(
+                        site.get("name", key), obs["missed_reason"], obs["duration_sec"])):
+                    state_mod.clear_missed(st, key)  # 전달 성공 시에만 소거 — 실패면 재시도 (H-C)
             elif obs["alert"]:
                 sent = notify.send(
                     notify.fmt_transition(
@@ -90,13 +91,15 @@ def main():
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
     load_env()
-    # 텔레그램 반쪽 설정은 조용한 오설정 — 콘솔로 새는데 '전달 성공'으로 기록된다 (G5)
+    # 텔레그램 반쪽 설정은 조용한 오설정(G5) — 단, 기동을 막지는 않는다.
+    # 사이트 설정 오류를 스킵으로 처리한 가용성 원칙과 동일하게, 크게 경고하고
+    # 콘솔 알림 모드로 감시는 계속한다 (4차 게이트 H-G — 차단은 원칙 불일치)
     has_token = bool(os.environ.get("TELEGRAM_BOT_TOKEN"))
     has_chat = bool(os.environ.get("TELEGRAM_CHAT_ID"))
     if has_token != has_chat:
-        print("[설정 오류] TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID 중 하나만 설정됨 — 둘 다 넣거나 둘 다 비우세요(비우면 콘솔 알림 데모 모드)")
-        sys.exit(2)
-    if not has_token:
+        print("[설정 경고] TELEGRAM 토큰/챗ID 중 하나만 설정됨 — 텔레그램 발송 불가, "
+              "콘솔 알림 모드로 동작합니다. 텔레그램을 쓰려면 둘 다 설정하세요")
+    elif not has_token:
         print("[안내] 텔레그램 미설정 — 알림은 콘솔로 출력됩니다 (데모 모드)")
     parser = argparse.ArgumentParser(prog="watcher", description="배포 검증 워처")
     sub = parser.add_subparsers(dest="command", required=True)

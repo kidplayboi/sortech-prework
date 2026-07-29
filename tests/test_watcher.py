@@ -163,6 +163,13 @@ class IsolationTest(unittest.TestCase):
         self.assertEqual(bad, {"s"})
         self.assertEqual(len(errors), 2)
 
+    def test_validate_sites_rejects_empty_marker(self):
+        """H-B: 빈 문자열 마커는 모든 페이지를 통과시켜 L2를 무음 무력화한다"""
+        _errors, _warnings, bad = checks_validate(
+            {"s": {"name": "n", "url": "u", "markers": [""]}}
+        )
+        self.assertEqual(bad, {"s"})
+
 
 class ConsoleFallbackTest(unittest.TestCase):
     def test_console_fallback_counts_as_delivered(self):
@@ -188,6 +195,17 @@ class MissedTransientTest(unittest.TestCase):
         obs = state_mod.observe(st, "s", "OK", "정상", confirm=1)
         self.assertIsNone(obs["missed_reason"])
         self.assertTrue(obs["alert"])
+
+    def test_missed_report_retries_until_delivered(self):
+        """H-C: 사후 보고도 전달 성공까지 유지 — clear_missed 후에만 소거"""
+        st = {}
+        state_mod.observe(st, "s", "FAIL", "L1 HTTP 503", confirm=1)
+        state_mod.observe(st, "s", "OK", "정상", confirm=1)
+        obs = state_mod.observe(st, "s", "OK", "정상", confirm=1)  # 발송 실패 후 재관측
+        self.assertEqual(obs["missed_reason"], "L1 HTTP 503")
+        state_mod.clear_missed(st, "s")
+        obs = state_mod.observe(st, "s", "OK", "정상", confirm=1)
+        self.assertIsNone(obs["missed_reason"])
 
 
 class CheckExceptionTest(unittest.TestCase):
@@ -253,10 +271,17 @@ class BoundedGetIntegrationTest(unittest.TestCase):
 
     def test_trickle_server_hits_total_deadline(self):
         """G3: 개별 read가 타임아웃을 안 넘는 찔끔 응답도 총 시한에 끊긴다"""
+        baseline = threading.active_count()
         started = time.monotonic()
         with self.assertRaises(requests.RequestException):
             checks._bounded_get("http://127.0.0.1:%d/slow" % self.port, 2)
         self.assertLess(time.monotonic() - started, 6)
+        # H-A/H-F: 반환 시각만 재면 안 된다 — 워커·소켓이 실제로 회수되는지 검증.
+        # (이전 구현은 시한마다 스레드가 누적돼 프로세스가 99.7초 생존했다)
+        deadline = time.monotonic() + 4
+        while threading.active_count() > baseline and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertLessEqual(threading.active_count(), baseline)
 
     def test_size_cap_marks_truncated(self):
         with mock.patch.object(checks, "MAX_BODY_BYTES", 1000):

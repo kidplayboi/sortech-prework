@@ -54,9 +54,9 @@ def validate_sites(sites):
         markers = site.get("markers")
         if markers is not None and (
             not isinstance(markers, list)
-            or any(not isinstance(m, str) for m in markers)
-        ):
-            errors.append("%s: markers는 문자열 리스트여야 함" % key)
+            or any(not isinstance(m, str) or not m.strip() for m in markers)
+        ):  # 빈 문자열 마커는 모든 페이지를 통과시켜 L2를 무음 무력화한다 (H-B)
+            errors.append("%s: markers는 비어있지 않은 문자열 리스트여야 함" % key)
             bad_keys.add(key)
         version_url = site.get("version_url")
         if version_url is not None and not isinstance(version_url, str):
