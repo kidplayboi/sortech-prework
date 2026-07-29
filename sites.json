@@ -1,0 +1,12 @@
+{
+  "demo-shop": {
+    "name": "데모샵",
+    "url": "https://kidplayboi.github.io/deploy-watcher-demo/",
+    "markers": [
+      "데모샵",
+      "장바구니"
+    ],
+    "version_url": "https://kidplayboi.github.io/deploy-watcher-demo/version.txt",
+    "timeout_sec": 10
+  }
+}
