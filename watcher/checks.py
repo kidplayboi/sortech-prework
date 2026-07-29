@@ -45,8 +45,8 @@ def _bounded_get(url, timeout_sec):
       requests.Timeout을 즉시 받는다. 워커 회수는 3중 구조 — close() 위임(best-effort)
       + 무응답 시 read timeout + 데이터가 흐르는 동안엔 청크마다 인라인 데드라인
       자가 종료. 단, 바이트 단위로 계속 흘리는 병적 트리클은 단일 read가 길어져
-      회수가 지연될 수 있다(2MB 상한으로 유한하며 데몬이라 프로세스 종료는 막지
-      않는다 — 7차 N-A, README '알려진 한계' 참조).
+      회수가 매우 오래 지연되거나 사실상 되지 않을 수 있다(데몬이라 프로세스
+      종료는 막지 않는다 — 7·8차 N-A, README '알려진 한계' 참조).
     - truncated=True는 '크기 상한으로 잘린 부분 본문'을 뜻한다 — 이 신호 없이
       부분 본문을 정상 응답처럼 반환하면 멀쩡한 페이지가 오탐된다 (2차 N1 교정).
     """
@@ -88,11 +88,12 @@ def _bounded_get(url, timeout_sec):
             # close()는 워커의 in-flight read가 끝나기를 기다리며 수 초 블록할 수
             # 있음이 계측됐다 (5차 게이트 K-A — 메인에서 동기 호출하면 시한이 다시
             # 깨진다). 데몬 스레드에 위임해 메인은 즉시 복귀하고, 회수는 best-effort로
-            # 앞당긴다. 최종 회수 보장은 워커 자신의 read timeout.
+            # 앞당긴다. 회수는 close 위임·read timeout·인라인 데드라인의 조합이며,
+            # 병적 트리클에선 사실상 안 될 수도 있다 (README '알려진 한계').
             threading.Thread(target=resp.close, daemon=True, name="watcher-close").start()
         # 알려진 한계 (K-B): 응답 헤더 단계에서 멈추는 병적 서버는 requests.get()이
         # 반환하지 않아 holder가 비고, 닫을 핸들 자체가 없다. 워커는 데몬이라
-        # 프로세스 종료는 막지 않으며, read timeout이 걸리는 시점에 자연 회수된다.
+        # 프로세스 종료는 막지 않지만, 서버가 계속 흘리는 한 회수는 사실상 안 될 수 있다.
         raise requests.Timeout("총 시한 %d초 초과" % timeout_sec)
     if "exc" in result:
         raise result["exc"]
