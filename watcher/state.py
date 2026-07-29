@@ -48,9 +48,11 @@ def observe(state, site_key, status, reason, confirm=1):
     반환 dict: alert(발송 필요), status(확정 상태), prev_notified, duration_sec, reason
     """
     entry = state.setdefault(site_key, {})
-    if "observed" not in entry:  # 신규 또는 구버전 스키마 → 안전 초기화
+    if "observed" not in entry:  # 신규 또는 구버전 스키마 → 완전 재초기화 (N6: 죽은 키 제거)
+        entry.clear()
         entry.update({"observed": None, "streak": 0, "confirmed": None,
-                      "confirmed_since": None, "notified": "OK", "reason": ""})
+                      "confirmed_since": None, "notified": "OK", "reason": "",
+                      "confirmed_reason": ""})
     now = int(time.time())
 
     if status == entry["observed"]:
@@ -64,6 +66,9 @@ def observe(state, site_key, status, reason, confirm=1):
         prev_since = entry["confirmed_since"]
         entry["confirmed"] = status
         entry["confirmed_since"] = now
+        # 확정 시점의 사유를 따로 보관 — 발송 재시도 중 다른 관측의 사유가
+        # 섞여 "🔴 이상 감지 — HTTP 200 정상" 같은 자기모순 알림 방지 (N2)
+        entry["confirmed_reason"] = reason
         entry["last_change_duration"] = now - prev_since if prev_since else 0
 
     needs_alert = (
@@ -74,7 +79,7 @@ def observe(state, site_key, status, reason, confirm=1):
         "status": entry["confirmed"],
         "prev_notified": entry["notified"],
         "duration_sec": entry.get("last_change_duration", 0),
-        "reason": entry["reason"],
+        "reason": entry.get("confirmed_reason") or entry["reason"],
     }
 
 

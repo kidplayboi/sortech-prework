@@ -11,8 +11,10 @@ def send(text):
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
+        # 콘솔 폴백도 '전달 성공'으로 간주 — False를 주면 같은 알림이
+        # 매 패스 영구 반복된다 (2차 게이트 N4 회귀 교정)
         print("[알림-콘솔] %s" % text)
-        return False
+        return True
     try:
         resp = requests.post(
             "https://api.telegram.org/bot%s/sendMessage" % token,
@@ -36,6 +38,8 @@ def fmt_transition(site_name, new_status, reason, prev_status, duration_sec):
     if new_status == "WARN":
         return "🟠 [%s] %s · 계속 감시" % (site_name, reason)
     if prev_status in ("FAIL", "WARN"):
+        if duration_sec <= 0:  # 지속시간 미상(최초 확정 등)이면 수치를 지어내지 않는다 (N8)
+            return "🟢 [%s] 회복 — 정상 복귀" % site_name
         return "🟢 [%s] 회복 — %s 만에 정상 복귀" % (site_name, _fmt_duration(duration_sec))
     return "🟢 [%s] 정상" % site_name
 
@@ -43,5 +47,5 @@ def fmt_transition(site_name, new_status, reason, prev_status, duration_sec):
 def _fmt_duration(seconds):
     """10초 장애를 '1분'으로 부풀리지 않는다 (P3-5)"""
     if seconds < 60:
-        return "%d초" % max(1, seconds)
+        return "%d초" % seconds
     return "%d분" % (seconds // 60)

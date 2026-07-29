@@ -21,24 +21,26 @@ def run_pass(sites, st, alert, persist=True):
     소비해 장애 알림이 증발하던 문제(P1-2)의 교정.
     """
     for key, site in sites.items():
-        try:
+        try:  # 격리 범위 = 루프 본문 전체 — observe/알림 단계의 예외도 다음 사이트로 전파 금지 (N3)
             results = checks.check_site(site)
             status, reason = state_mod.summarize(results)
-        except Exception as exc:
-            status, reason = "FAIL", "체크 자체 실패: %s" % type(exc).__name__
-        print("%s [%s] %s %s" % (_now(), site.get("name", key), DOT[status], reason))
-        if not alert:
-            continue
-        obs = state_mod.observe(st, key, status, reason, confirm=site.get("confirm_checks", 1))
-        if obs["alert"]:
-            sent = notify.send(
-                notify.fmt_transition(
-                    site.get("name", key), obs["status"], obs["reason"],
-                    obs["prev_notified"], obs["duration_sec"],
-                )
+            print("%s [%s] %s %s" % (_now(), site.get("name", key), DOT[status], reason))
+            if not alert:
+                continue
+            obs = state_mod.observe(
+                st, key, status, reason, confirm=site.get("confirm_checks", 1)
             )
-            if sent:
-                state_mod.mark_notified(st, key)
+            if obs["alert"]:
+                sent = notify.send(
+                    notify.fmt_transition(
+                        site.get("name", key), obs["status"], obs["reason"],
+                        obs["prev_notified"], obs["duration_sec"],
+                    )
+                )
+                if sent:
+                    state_mod.mark_notified(st, key)
+        except Exception as exc:
+            print("%s [%s] ⚠️ 처리 실패: %s" % (_now(), site.get("name", key) if isinstance(site, dict) else key, type(exc).__name__))
     if alert and persist:
         state_mod.save_state(st)
 
@@ -74,6 +76,9 @@ def _positive_interval(value):
 
 
 def main():
+    # 한글 Windows(cp949) 콘솔/리다이렉트에서 이모지 출력이 죽지 않게 (N9)
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     load_env()
     parser = argparse.ArgumentParser(prog="watcher", description="배포 검증 워처")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -88,12 +93,14 @@ def main():
     if not sites:
         print("감시 대상이 없습니다. sites.json을 확인하세요.")
         sys.exit(2)
-    errors, warnings = validate_sites(sites)
+    errors, warnings, bad_keys = validate_sites(sites)
     for warning in warnings:
         print("[경고] %s" % warning)
-    if errors:
-        for error in errors:
-            print("[설정 오류] %s" % error)
+    for error in errors:
+        print("[설정 오류 → 해당 사이트 제외] %s" % error)
+    sites = {k: v for k, v in sites.items() if k not in bad_keys}
+    if not sites:  # 전멸일 때만 기동 차단 — 일부 오류는 스킵하고 나머지는 감시 (가용성 우선)
+        print("유효한 감시 대상이 없습니다.")
         sys.exit(2)
 
     {"status": cmd_status, "once": cmd_once, "watch": cmd_watch}[args.command](sites, args)

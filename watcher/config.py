@@ -35,15 +35,31 @@ def load_sites():
 
 
 def validate_sites(sites):
-    """기동 시 스키마 검증 (P2-3). 반환: (차단 오류 목록, 경고 목록)"""
-    errors, warnings = [], []
+    """기동 시 스키마+타입 검증 (P2-3·N3·N5).
+
+    반환: (오류 목록, 경고 목록, 오류 사이트 키 집합).
+    오류 사이트는 기동을 막지 않고 건너뛴다 — 감시 도구는 가용성 우선:
+    설정 오타 한 줄이 나머지 정상 사이트의 감시까지 중단시키면 안 된다.
+    """
+    errors, warnings, bad_keys = [], [], set()
     for key, site in sites.items():
         if not isinstance(site, dict):
             errors.append("%s: 객체가 아님" % key)
+            bad_keys.add(key)
             continue
         for field in ("name", "url"):
             if not site.get(field):
                 errors.append("%s: 필수 항목 '%s' 없음" % (key, field))
-        if not site.get("markers"):
+                bad_keys.add(key)
+        markers = site.get("markers")
+        if markers is not None and not isinstance(markers, list):
+            errors.append("%s: markers는 리스트여야 함 (문자열이면 글자 단위로 오검사됨)" % key)
+            bad_keys.add(key)
+        for field in ("confirm_checks", "timeout_sec"):
+            value = site.get(field)
+            if value is not None and not isinstance(value, int):
+                errors.append("%s: %s는 정수여야 함 (현재 %r)" % (key, field, value))
+                bad_keys.add(key)
+        if not markers:
             warnings.append("%s: markers 미설정 — L2 내용 검증 비활성" % key)
-    return errors, warnings
+    return errors, warnings, bad_keys

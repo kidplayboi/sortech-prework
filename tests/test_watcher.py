@@ -8,6 +8,7 @@ from unittest import mock
 
 from watcher import checks, state as state_mod
 from watcher.cli import run_pass
+from watcher.config import validate_sites as checks_validate
 
 
 class StateTransitionTest(unittest.TestCase):
@@ -100,6 +101,65 @@ class CachePolicyTest(unittest.TestCase):
 
     def test_minutes(self):
         self.assertIn("10분", checks._cache_policy({"Cache-Control": "max-age=600"}))
+
+
+class TruncatedBodyTest(unittest.TestCase):
+    def test_truncated_body_is_not_content_missing(self):
+        """N1: 부분 수신 본문에서 마커 부재를 '핵심 내용 없음'으로 단정하면 안 된다"""
+        site = {"markers": ["데모샵"]}
+        result = checks._l2_content(site, b"<html>partial", {}, truncated=True)
+        self.assertFalse(result["ok"])
+        self.assertIn("부분 수신", result["detail"])
+        self.assertNotIn("핵심 내용 없음", result["detail"])
+
+    def test_complete_body_missing_marker_is_content_missing(self):
+        site = {"markers": ["데모샵"]}
+        result = checks._l2_content(site, b"<html>other", {}, truncated=False)
+        self.assertIn("핵심 내용 없음", result["detail"])
+
+
+class ConfirmedReasonTest(unittest.TestCase):
+    def test_alert_uses_confirmed_reason_not_latest_observation(self):
+        """N2: 발송 대기 중 다른 관측의 사유가 섞여 자기모순 알림이 되면 안 된다"""
+        st = {}
+        state_mod.observe(st, "s", "FAIL", "L1 HTTP 503", confirm=2)
+        state_mod.observe(st, "s", "FAIL", "L1 HTTP 503", confirm=2)  # 확정
+        obs = state_mod.observe(st, "s", "OK", "L1 HTTP 200 · 정상", confirm=2)  # 미확정 관측
+        self.assertTrue(obs["alert"])
+        self.assertEqual(obs["status"], "FAIL")
+        self.assertEqual(obs["reason"], "L1 HTTP 503")
+
+
+class IsolationTest(unittest.TestCase):
+    def test_one_site_failure_does_not_stop_pass(self):
+        """N3: 한 사이트의 처리 예외가 다음 사이트 순찰을 막으면 안 된다"""
+        sites = {
+            "a": {"name": "A", "url": "http://a.invalid"},
+            "b": {"name": "B", "url": "http://b.invalid"},
+        }
+        fixed = [{"layer": "L1", "ok": True, "detail": "HTTP 200 · 1ms"}]
+        with mock.patch.object(checks, "check_site", return_value=fixed), \
+             mock.patch.object(state_mod, "observe", side_effect=[TypeError("boom"), {
+                 "alert": False, "status": "OK", "prev_notified": "OK",
+                 "duration_sec": 0, "reason": "r"}]) as observe, \
+             mock.patch.object(state_mod, "save_state"):
+            run_pass(sites, {}, alert=True, persist=False)
+        self.assertEqual(observe.call_count, 2)
+
+    def test_validate_sites_rejects_wrong_types(self):
+        errors, _warnings, bad = checks_validate(
+            {"s": {"name": "n", "url": "u", "markers": "데모샵", "confirm_checks": "2"}}
+        )
+        self.assertEqual(bad, {"s"})
+        self.assertEqual(len(errors), 2)
+
+
+class ConsoleFallbackTest(unittest.TestCase):
+    def test_console_fallback_counts_as_delivered(self):
+        """N4: 토큰 없는 콘솔 폴백이 False면 같은 알림이 영구 반복된다"""
+        from watcher import notify
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertTrue(notify.send("테스트"))
 
 
 class BustUrlTest(unittest.TestCase):

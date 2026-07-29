@@ -21,12 +21,12 @@ VERSION_MAX_LEN = 64
 def check_site(site):
     results = []
 
-    l1, body, headers = _l1_alive(site)
+    l1, body, headers, truncated = _l1_alive(site)
     results.append(l1)
     if not l1["ok"]:
         return results
 
-    l2 = _l2_content(site, body, headers)
+    l2 = _l2_content(site, body, headers, truncated)
     results.append(l2)
     if not l2["ok"]:
         return results
@@ -38,19 +38,25 @@ def check_site(site):
 
 
 def _bounded_get(url, timeout_sec):
-    """총 시한·크기 상한이 있는 GET. 반환: (status_code, body_bytes, headers)"""
+    """총 시한·크기 상한이 있는 GET. 반환: (status_code, body_bytes, headers, truncated)
+
+    truncated=True는 본문이 '부분 수신'임을 뜻한다 — 이 신호 없이 부분 본문을
+    정상 응답처럼 반환하면, 느린 사이트의 멀쩡한 페이지가 "내용 없음"으로
+    오탐된다 (2차 게이트 N1 교정).
+    """
     deadline = time.monotonic() + timeout_sec
     resp = requests.get(
         url, timeout=(5, timeout_sec), stream=True, headers={"User-Agent": UA}
     )
-    chunks, size = [], 0
-    for chunk in resp.iter_content(8192):
-        chunks.append(chunk)
-        size += len(chunk)
-        if size > MAX_BODY_BYTES or time.monotonic() > deadline:
-            resp.close()
-            break
-    return resp.status_code, b"".join(chunks), resp.headers
+    chunks, size, truncated = [], 0, False
+    with resp:  # 예외 경로에서도 커넥션 반환 (N11)
+        for chunk in resp.iter_content(8192):
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > MAX_BODY_BYTES or time.monotonic() > deadline:
+                truncated = True
+                break
+    return resp.status_code, b"".join(chunks), resp.headers, truncated
 
 
 def _decode(body, headers):
@@ -77,23 +83,27 @@ def _decode(body, headers):
 def _l1_alive(site):
     started = time.monotonic()
     try:
-        status, body, headers = _bounded_get(site["url"], site.get("timeout_sec", 10))
+        status, body, headers, truncated = _bounded_get(
+            site["url"], site.get("timeout_sec", 10)
+        )
         elapsed_ms = int((time.monotonic() - started) * 1000)
         ok = status == 200
         return (
             {"layer": "L1", "ok": ok, "detail": "HTTP %d · %dms" % (status, elapsed_ms)},
             body,
             headers,
+            truncated,
         )
     except requests.RequestException as exc:
         return (
             {"layer": "L1", "ok": False, "detail": "요청 실패: %s" % type(exc).__name__},
             b"",
             {},
+            False,
         )
 
 
-def _l2_content(site, body, headers):
+def _l2_content(site, body, headers, truncated=False):
     markers = site.get("markers", [])
     if not markers:
         # 마커 미설정을 조용한 통과로 두지 않는다 (P2-5) — 비활성임을 명시
@@ -101,6 +111,14 @@ def _l2_content(site, body, headers):
     text = _decode(body, headers)
     missing = [m for m in markers if m not in text]
     if missing:
+        if truncated:
+            # 부분 수신 본문에서 마커 부재를 "내용 없음"으로 단정하지 않는다 (N1)
+            return {
+                "layer": "L2",
+                "ok": False,
+                "detail": "본문 부분 수신(%d바이트, 시한/크기 초과) — 내용 검증 불가"
+                % len(body),
+            }
         return {
             "layer": "L2",
             "ok": False,
@@ -139,9 +157,11 @@ def _fetch_version(site, bust):
     """반환: (버전, 실패사유, 캐시정책). 실패 시 버전=None"""
     url = _bust_url(site["version_url"]) if bust else site["version_url"]
     try:
-        status, body, headers = _bounded_get(url, site.get("timeout_sec", 10))
+        status, body, headers, truncated = _bounded_get(url, site.get("timeout_sec", 10))
         if status != 200:
             return None, "HTTP %d" % status, ""
+        if truncated:
+            return None, "부분 수신(시한/크기 초과)", ""
         version = _decode(body, headers).strip().splitlines()[0].strip() if body.strip() else ""
         if not version or len(version) > VERSION_MAX_LEN:
             return None, "버전 파일 형식 이상(비었거나 %d자 초과)" % VERSION_MAX_LEN, ""
