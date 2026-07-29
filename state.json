@@ -1,7 +1,0 @@
-{
-  "demo-shop": {
-    "status": "OK",
-    "since": 1785314918,
-    "reason": "L1 HTTP 200 · 418ms · L2 마커 2/2 · L3 v1.0.1=v1.0.1"
-  }
-}
