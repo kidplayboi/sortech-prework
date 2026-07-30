@@ -335,13 +335,19 @@ class _DemoHandler(http.server.BaseHTTPRequestHandler):
 class _ChunkDripHandler(http.server.BaseHTTPRequestHandler):
     """chunk-size 줄을 바이트 단위로 드리블 — readline()이 버퍼 락을 쥔 채 여러
     recv에 걸쳐 블록하는 9차 P1-1 재현. chunked는 HTTP/1.1에서만 해석되므로
-    기존 1.0 핸들러와 분리한다 (keep-alive 파급 차단). 100회×~0.15초 ≈ 안전 상한 15초."""
+    기존 1.0 핸들러와 분리한다. 400회×0.05초 ≈ 안전 상한 20초 (10차 P3-1 정정).
+
+    /chunkdrip = keep-alive · /chunkdrip-close = Connection: close — 후자는 소켓
+    소유권이 응답으로 넘어가 _connection.sock이 None이 되는 변종 (10차 P1-1:
+    내부 속성 경유 shutdown은 이 변종을 못 깨웠다. 두 변종 모두 고정해야 한다)."""
 
     protocol_version = "HTTP/1.1"
 
     def do_GET(self):
         self.send_response(200)
         self.send_header("Transfer-Encoding", "chunked")
+        if self.path.startswith("/chunkdrip-close"):
+            self.send_header("Connection", "close")
         self.end_headers()
         try:
             # chunk-size 줄을 끝내지 않고 chunk-extension 바이트를 계속 드리블 —
@@ -424,6 +430,21 @@ class BoundedGetIntegrationTest(unittest.TestCase):
         started = time.monotonic()
         with self.assertRaises(requests.RequestException):
             checks._bounded_get("http://127.0.0.1:%d/chunkdrip" % self.chunk_port, 1)
+        self.assertLess(time.monotonic() - started, 4)
+        deadline = time.monotonic() + 4
+        while self._watcher_threads() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(self._watcher_threads(), [])
+
+    def test_chunked_dribble_connection_close_variant_reclaimed(self):
+        """10차 P1-1: Connection: close 변종 — _connection.sock이 None이라
+        내부 속성 경유 shutdown이 무효였다. raw.shutdown()은 소유권 이전 전에
+        저장된 참조를 써서 이 변종도 깨운다 (sock 경유였던 9차 수리는 여기서 RED)."""
+        started = time.monotonic()
+        with self.assertRaises(requests.RequestException):
+            checks._bounded_get(
+                "http://127.0.0.1:%d/chunkdrip-close" % self.chunk_port, 1
+            )
         self.assertLess(time.monotonic() - started, 4)
         deadline = time.monotonic() + 4
         while self._watcher_threads() and time.monotonic() < deadline:

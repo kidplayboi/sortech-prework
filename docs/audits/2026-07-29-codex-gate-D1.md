@@ -133,3 +133,12 @@ P1-2/3/4의 뿌리는 하나 — `status` 필드가 "관측된 상태"와 "통�
 - **깨끗한 축(러너 실측)**: EOF 오판·truncated 우회 없음 · 압축 무손실 7조합 · 압축폭탄 cap · 데드라인 엣지 · 임포트 가드 실작동 · 음성대조 성립(identity 트리클 옛 코드 31.4초 vs 수리 1.04초) · 형제 인스턴스 없음
 - **⚠️오답 14호 (수리 중 적발)**: 내가 만든 chunked 드리블 회귀 테스트가 **수리 없이도 통과하는 vacuous 테스트**였음 — 짧게 끝나는 줄 드리블은 readline이 줄 사이마다 락을 놓아 close-only도 회수됨. **음성대조(가드를 close-only로 되돌려 실행)가 적발** → "줄을 끝내지 않는 chunk-extension 드리블"로 교정 후 RED 실측 확인. 음성대조 규율이 없었으면 가짜 회귀 고정을 커밋했을 것
 - 검증: 38개 5연속 GREEN · 음성대조 2종(트리클/chunked 드리블) RED 실측 · 라이브 🟢
+
+## 10차 게이트: **FAIL** (P1 1 · P2 1 · P3 2) — 9차 수리 델타 검증 (2026-07-30)
+
+- **P1-1 (수용)**: 9차 shutdown 수리가 **또 클래스를 못 닫음** — `Connection: close` 응답은 소켓 소유권이 응답으로 넘어가 `_connection.sock`이 None → 내부 속성 경유 shutdown이 아예 실행 안 됨 (러너 실측: keep-alive 1.08초 회수 vs close 변종 7초+ 잔존). urllib3는 정확히 이 문제 때문에 소유권 이전 전에 shutdown 참조를 저장하고 공개 API `HTTPResponse.shutdown()`으로 노출 — 내부 속성을 직접 판 것이 원인. 게다가 테스트도 하필 통과하는 변종(keep-alive)만 고정했고, 문서는 다시 "본문 단계 종결"을 선언 (3라운드 연속 과잉 선언 패턴). **수리**: `_force_close`를 `raw.shutdown()` 선행으로 재작성(구버전 폴백 유지) + close 변종 회귀 테스트
+- **P2-1 (수용)**: `_force_close`가 OSError만 방어 — TLS-in-TLS(SSLTransport)는 shutdown API 자체가 없어 AttributeError 누출 + `resp.close()` 미실행 (docstring "예외는 삼킨다"와 코드 불일치). **수리**: except Exception + finally close 보장. SSLTransport 환경의 드리블 회수는 **한계로 정직 명기** (README 4항째)
+- **P3 2건 (수용)**: 테스트 docstring 수치 불일치(100회×0.15≈15초 vs 실제 400회×0.05≈20초 — 오답 14호 교정 때 남은 잔재) / 본문 중지 장애 문구 비결정(총시한 vs read timeout 승자) → read timeout을 총시한+1초로 결정화
+- **깨끗한 축(러너 실측)**: 예외 번역 4종이 urllib3 `_error_catcher` 번역표를 전수 커버 · P2-1 3종 end-to-end 수리 확인 · keep-alive/TLS 드리블 1.03초 회수 · 음성대조 3건 성립(러너가 빌더 보고 불신하고 직접 재검증 — 사실로 확인) · 압축 무손실 7조합 · 풀 오염 없음 · 39개 GREEN
+- **⚠️오답 15호**: 벤더 내부 속성(`_connection.sock`) 직접 접근이 소유권 이전이라는 내부 계약을 놓침 — **벤더가 공개 API를 제공하는 데는 이유가 있다**. 9차에서 "실측 1.07초 회수"까지 확인하고도 keep-alive 변종만 실측한 것이라 반쪽 검증이었음
+- 수리 검증: 39개 5연속 GREEN · 음성대조(9차 코드 복원 → close 변종 정확히 RED) · 라이브 🟢

@@ -57,8 +57,10 @@ def _bounded_get(url, timeout_sec):
       반환)이라 데이터가 산출되는 한 매 반환마다 데드라인 자가 종료 ② 프레이밍/압축
       내부 읽기에 갇혀 ①이 안 도는 구간(chunk-size 줄 드리블 등)은 시한 초과 시
       위임 스레드가 소켓을 shutdown으로 깨서 회수한다 (9~10차 게이트 — close()만으로는
-      readline이 쥔 버퍼 락에 막혀 무기한 블록됨이 계측됐다). 무응답 구간은 read
-      timeout이 끊는다. 남는 한계 = 응답 헤더 단계 정체(K-B) — README '알려진 한계'.
+      readline이 쥔 버퍼 락에 막혀 무기한 블록됨이 계측됐다. keep-alive와
+      Connection: close 두 변종 모두 raw.shutdown() 경유로 커버). 무응답 구간은
+      read timeout이 끊는다. 남는 한계 = 응답 헤더 단계 정체(K-B)와 https 프록시
+      경유(TLS-in-TLS — shutdown API 부재) — README '알려진 한계'.
     - truncated=True는 '크기 상한으로 잘린 부분 본문'을 뜻한다 — 이 신호 없이
       부분 본문을 정상 응답처럼 반환하면 멀쩡한 페이지가 오탐된다 (2차 N1 교정).
     """
@@ -68,8 +70,11 @@ def _bounded_get(url, timeout_sec):
 
     def _fetch():
         try:
+            # read timeout은 총 시한보다 1초 크게 — 같은 본문 중지 장애가 총시한/
+            # read timeout 승자에 따라 두 문구(Timeout vs ConnectionError)로 갈리는
+            # 비결정 제거 (10차 P3-2). 무응답 워커 자가 종료는 1초 늦어질 뿐 유지
             resp = requests.get(
-                url, timeout=(5, timeout_sec), stream=True, headers={"User-Agent": UA}
+                url, timeout=(5, timeout_sec + 1), stream=True, headers={"User-Agent": UA}
             )
             holder["resp"] = resp  # 시한 초과 시 정리 위임 스레드가 close()할 수 있게 공유
             chunks, size, truncated = [], 0, False
@@ -132,25 +137,33 @@ def _bounded_get(url, timeout_sec):
 
 
 def _force_close(resp):
-    """시한 초과 정리 (위임 스레드 전용). 소켓 shutdown → close 순서.
+    """시한 초과 정리 (위임 스레드 전용). raw.shutdown() 선행 → close 보장.
 
     close()는 워커의 readline이 쥔 BufferedReader 락을 기다리지만, shutdown은
-    락 없이 블록된 recv를 즉시 깬다 (9차 P1-1 — chunk-size 줄 드리블에서
-    close-only는 워커·정리 스레드가 함께 무기한 잔존함이 계측됐다).
-    _connection은 urllib3 내부 속성이라 방어적으로 접근한다(없으면 close만,
-    실검증 urllib3 2.7.0). 예외는 삼킨다 — 이미 닫힌/깨진 소켓의 정리 실패에
-    더 할 수 있는 일이 없고, 데몬 스레드의 스택 덤프만 남긴다.
+    락 없이 블록된 recv를 즉시 깬다 (9차 P1-1). 진입점은 urllib3 2.x 공개 API
+    HTTPResponse.shutdown() — Connection: close 응답은 소켓 소유권이 응답으로
+    넘어가 _connection.sock이 None이 되므로 내부 속성 직접 접근은 keep-alive
+    변종만 깨운다 (10차 P1-1 실측). urllib3는 정확히 그 이유로 소유권 이전 전에
+    shutdown 참조를 저장해 둔다. 구버전(2.0.x) shutdown 미탑재 대비 폴백 유지.
+    예외는 전부 삼키고 close는 finally로 보장한다 (10차 P2-1 — TLS-in-TLS의
+    SSLTransport는 shutdown API 자체가 없어 AttributeError/ValueError 경로 존재.
+    그 환경의 프레이밍 드리블 회수는 잔존 한계 — README '알려진 한계').
     """
-    sock = getattr(getattr(getattr(resp, "raw", None), "_connection", None), "sock", None)
-    if sock is not None:
-        try:
-            sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
+    raw = getattr(resp, "raw", None)
     try:
-        resp.close()
+        raw.shutdown()
     except Exception:
-        pass
+        # shutdown 미탑재(구버전)·_sock_shutdown 없음(SSLTransport)·이미 닫힘 —
+        # keep-alive 한정이지만 _connection.sock 직접 shutdown으로 폴백
+        try:
+            raw._connection.sock.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+    finally:
+        try:
+            resp.close()
+        except Exception:
+            pass
 
 
 def _decode(body, headers):
