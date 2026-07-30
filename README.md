@@ -22,8 +22,9 @@
 | L1 생존 | HTTP 상태·응답시간 (총 시한·크기 상한 있는 실측) | 다운·지연 |
 | L2 내용 | 페이지 안 필수 마커 실존 (인코딩 폴백 포함) | **200 거짓 양성** — 살아있는데 빈/에러 페이지 |
 | L3 배포반영 | 캐시 우회(?nc) vs 사용자 시점 버전 비교 + 캐시 정책(max-age) 실측 | **배포했는데 옛 버전이 보이는 상태** |
+| L4 렌더링 | 헤드리스 브라우저 실렌더 → JS 예외·렌더된 화면의 마커 검증 | **HTML은 오는데 화면이 깨진 상태** — JS 크래시, JS로만 그리는 페이지(SPA)의 내용 증발 |
 
-L4 렌더링 검증(헤드리스 브라우저)·배포 직후 집중 감시 모드는 로드맵 — `docs/01-스펙.md` 참조.
+배포 직후 집중 감시 모드·보안 층(L5)은 빌드 중 — `docs/01-스펙.md`·`docs/04-D2-빌드노트.md` 참조.
 
 ## 설치·실행
 
@@ -51,7 +52,7 @@ python -m watcher watch --interval 300  # 주기 순찰 (기본 300초, 최소 5
 }
 ```
 
-`markers` = 페이지에 반드시 있어야 할 텍스트. `version_url` = 배포 시 갱신하는 버전 파일(선택 — 없으면 L3 생략). `confirm_checks`(선택, 기본 1) = N회 연속 같은 관측일 때만 상태 확정(순단 플랩 방지).
+`markers` = 페이지에 반드시 있어야 할 텍스트. `version_url` = 배포 시 갱신하는 버전 파일(선택 — 없으면 L3 생략). `confirm_checks`(선택, 기본 1) = N회 연속 같은 관측일 때만 상태 확정(순단 플랩 방지). `render`(선택, 기본 false) = L4 렌더링 검증 — 무거워서 opt-in이며 Playwright 필요(`pip install playwright && python -m playwright install chromium`), `watch`에서는 `--render-every N`패스마다 1회(기본 5).
 
 `.env` — 텔레그램 알림. 변수는 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` 두 개 (형식은 `.env.example`). 둘 다 비우면 콘솔 알림 **데모 모드**로 동작.
 
@@ -65,7 +66,7 @@ python -m watcher watch --interval 300  # 주기 순찰 (기본 300초, 최소 5
 ## 테스트
 
 ```bash
-python -m unittest discover -s tests   # 40개 — 외부 AI 교차 게이트의 회귀 고정
+python -m unittest discover -s tests   # 43개 — 외부 AI 교차 게이트의 회귀 고정
 ```
 
 ## 알려진 한계 (정직하게)

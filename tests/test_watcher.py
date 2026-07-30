@@ -311,6 +311,29 @@ class _DemoHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
+        if self.path.startswith("/jsok"):
+            # 마커가 원본 HTML엔 없고 JS 렌더로만 생긴다 — L2는 놓치고 L4만 잡는 SPA
+            # 케이스. ⚠️마커를 소스에 통짜 문자열로 두면 L2 텍스트 검색에도 걸려
+            # 전제가 깨진다(첫 픽스처의 함정) — JS에서 조각을 합쳐 만든다
+            html = ("<html><body><div id='r'></div><script>"
+                    "document.getElementById('r').textContent='렌더'+'마커';"
+                    "</script></body></html>").encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(html)))
+            self.end_headers()
+            self.wfile.write(html)
+            return
+        if self.path.startswith("/jserr"):
+            html = ("<html><body>렌더마커<script>"
+                    "throw new TypeError('cart is undefined');"
+                    "</script></body></html>").encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(html)))
+            self.end_headers()
+            self.wfile.write(html)
+            return
         if self.path.startswith("/badgzip"):
             # gzip 선언 후 깨진 바이트 — urllib3 DecodeError 경로 (9차 P2-1)
             data = b"\x1f\x8b\x08\x00 broken not gzip"
@@ -509,6 +532,51 @@ class BoundedGetIntegrationTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(truncated)
         self.assertGreaterEqual(len(body), 1000)
+
+
+class RenderLayerTest(unittest.TestCase):
+    """L4 — 실제 헤드리스 렌더 경로 검증 (D2 슬라이스 ①). SETTLE_MS는 테스트에서
+    단축 — 로컬 정적 페이지는 load 직후 렌더가 끝난다."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _DemoHandler)
+        cls.server.daemon_threads = True
+        cls.port = cls.server.server_address[1]
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def _site(self, path, markers):
+        return {"name": "R", "url": "http://127.0.0.1:%d%s" % (self.port, path),
+                "markers": markers, "timeout_sec": 10}
+
+    def test_js_rendered_marker_passes_l4(self):
+        """마커가 원본 HTML엔 없고 JS 렌더로만 생기는 SPA — L2는 놓치고 L4가 잡는다"""
+        from watcher import render
+        site = self._site("/jsok", ["렌더마커"])
+        with mock.patch.object(render, "SETTLE_MS", 100):
+            result = render.check_render(site)
+        self.assertTrue(result["ok"], result["detail"])
+        # 교차 확인: 같은 페이지가 L2(원본 HTML)에서는 실제로 마커 부재다
+        _status, body, headers, _tr = checks._bounded_get(site["url"], 5)
+        self.assertNotIn("렌더마커", checks._decode(body, headers))
+
+    def test_uncaught_js_error_fails_l4(self):
+        from watcher import render
+        with mock.patch.object(render, "SETTLE_MS", 100):
+            result = render.check_render(self._site("/jserr", ["렌더마커"]))
+        self.assertFalse(result["ok"])
+        self.assertIn("TypeError", result["detail"])
+
+    def test_rendered_missing_marker_fails_l4(self):
+        from watcher import render
+        with mock.patch.object(render, "SETTLE_MS", 100):
+            result = render.check_render(self._site("/jsok", ["존재하지않는문구"]))
+        self.assertFalse(result["ok"])
+        self.assertIn("핵심 내용 없음", result["detail"])
 
 
 class BustUrlTest(unittest.TestCase):

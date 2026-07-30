@@ -35,7 +35,7 @@ VERSION_MAX_LEN = 64
 READ1_CHUNK = 65536  # size cap 오버슈트 상한 = 이 값 — 본문이 상한+64KB까지 커질 수 있다 (9차 P3-3)
 
 
-def check_site(site):
+def check_site(site, do_render=True):
     results = []
 
     l1, body, headers, truncated = _l1_alive(site)
@@ -50,6 +50,15 @@ def check_site(site):
 
     if site.get("version_url"):
         results.append(_l3_deploy(site))
+
+    if do_render and site.get("render") is True:
+        # 하드 FAIL(비-warn)이 이미 있으면 무거운 L4를 돌려 확정 장애 알림을
+        # 지연시키지 않는다 (앞 층 FAIL=뒤 층 생략 원칙의 연장). warn(L3 미반영
+        # 등)은 렌더 확인이 오히려 유의미하므로 진행
+        if not any(not r["ok"] and not r.get("warn") for r in results):
+            from . import render  # 지연 임포트 — Playwright 없는 설치에서도 L1~L3 동작
+
+            results.append(render.check_render(site))
 
     return results
 

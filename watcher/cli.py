@@ -15,15 +15,16 @@ def _now():
     return datetime.datetime.now().strftime("%H:%M:%S")
 
 
-def run_pass(sites, st, alert, persist=True):
+def run_pass(sites, st, alert, persist=True, do_render=True):
     """전 사이트 1회 체크. 사이트 하나의 예외가 전체 순찰을 죽이지 않게 격리(P2-3).
 
     alert=False(status 명령)면 state를 읽지도 쓰지도 않는다 — 조회가 전이를
     소비해 장애 알림이 증발하던 문제(P1-2)의 교정.
+    do_render=False면 이 패스에서 L4(무거움)를 생략 — watch의 --render-every 주기.
     """
     for key, site in sites.items():
         try:
-            results = checks.check_site(site)
+            results = checks.check_site(site, do_render=do_render)
             status, reason = state_mod.summarize(results)
         except Exception as exc:
             # 체크 예외도 FAIL 상태로 만들어 알림 경로를 태운다 — 예외를 콘솔에만
@@ -72,9 +73,14 @@ def cmd_watch(sites, args):
     interval = args.interval
     print("순찰 시작 — %d초 간격, 대상 %d개 (중단: Ctrl+C)" % (interval, len(sites)))
     next_run = time.monotonic()
+    pass_index = 0
     try:
         while True:
-            run_pass(sites, st, alert=True)
+            # 평시엔 L1~L3 위주, 무거운 L4는 N패스마다 1회 (스펙 트리거 설계 —
+            # 첫 패스는 포함해 기동 직후 렌더 상태를 확보)
+            run_pass(sites, st, alert=True,
+                     do_render=(pass_index % args.render_every == 0))
+            pass_index += 1
             next_run += interval
             if next_run < time.monotonic():
                 # 절전 복귀·긴 패스 뒤 밀린 주기를 연속 실행으로 몰아치지 않는다 (M-F)
@@ -89,6 +95,13 @@ def _positive_interval(value):
     if interval < 5:
         raise argparse.ArgumentTypeError("간격은 5초 이상이어야 합니다")
     return interval
+
+
+def _positive_count(value):
+    count = int(value)
+    if count < 1:
+        raise argparse.ArgumentTypeError("1 이상이어야 합니다")
+    return count
 
 
 def main():
@@ -114,6 +127,8 @@ def main():
     watch = sub.add_parser("watch", help="주기 순찰")
     watch.add_argument("--interval", type=_positive_interval, default=300,
                        help="순찰 간격(초), 기본 300, 최소 5")
+    watch.add_argument("--render-every", type=_positive_count, default=5,
+                       help="L4 렌더링 검증을 N패스마다 1회 (기본 5, render:true 사이트만)")
     args = parser.parse_args()
 
     sites = load_sites()

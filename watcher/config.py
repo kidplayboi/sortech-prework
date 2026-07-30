@@ -87,6 +87,15 @@ def validate_sites(sites):
             warnings.append(
                 "%s: version_url이 null — 미설정으로 처리(L3 생략). 키를 빼는 걸 권장" % key
             )
+        render = site.get("render")
+        if "render" in site and render is None:
+            warnings.append(
+                "%s: render가 null — 미설정으로 처리(L4 비활성). 키를 빼는 걸 권장" % key
+            )
+        elif render is not None and not isinstance(render, bool):
+            # true 외의 truthy(문자열 "false" 등)를 켜짐으로 오해하는 사고 방지
+            errors.append("%s: render는 true/false여야 함 (현재 %r)" % (key, render))
+            bad_keys.add(key)
         for field in ("confirm_checks", "timeout_sec"):
             if field in site and site[field] is None:
                 errors.append("%s: %s가 null — 미사용이면 키 자체를 뺄 것" % (key, field))
