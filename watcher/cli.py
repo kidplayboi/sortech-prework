@@ -15,12 +15,37 @@ def _now():
     return datetime.datetime.now().strftime("%H:%M:%S")
 
 
-def run_pass(sites, st, alert, persist=True, do_render=True):
+CARRY_LAYER_PREFIXES = ("L4", "L5")  # 간헐 실행 층 — 스킵 패스에 직전 결과를 승계
+
+
+def _carry_layers(results, carried):
+    """이번 패스에 실행되지 않은 간헐 층의 직전 결과를 이어붙인다.
+
+    13차 P1-1 수리: L4를 건너뛴 패스를 "L4 정상"과 구분하지 못해 🔴→🟢"회복"→🔴
+    거짓 복구·플랩·미보고가 발생했다. 상태 엔진은 "이번에 본 층 전부"를 사이트
+    상태로 환산하므로, 안 본 층은 **마지막으로 본 결과**를 그대로 들고 가야 한다
+    (모르는 것을 정상으로 치지 않는다). 승계된 항목은 문구에 그 사실을 표시한다.
+    """
+    seen = {r["layer"] for r in results}
+    for layer, prev in carried.items():
+        if layer not in seen:
+            merged = dict(prev)
+            if "(이전 관측)" not in merged["detail"]:
+                merged["detail"] = "%s (이전 관측)" % merged["detail"]
+            results.append(merged)
+    for r in results:
+        if r["layer"].startswith(CARRY_LAYER_PREFIXES) and "(이전 관측)" not in r["detail"]:
+            carried[r["layer"]] = r
+    return results
+
+
+def run_pass(sites, st, alert, persist=True, do_render=True, carry=None):
     """전 사이트 1회 체크. 사이트 하나의 예외가 전체 순찰을 죽이지 않게 격리(P2-3).
 
     alert=False(status 명령)면 state를 읽지도 쓰지도 않는다 — 조회가 전이를
     소비해 장애 알림이 증발하던 문제(P1-2)의 교정.
     do_render=False면 이 패스에서 L4(무거움)를 생략 — watch의 --render-every 주기.
+    carry(dict)를 주면 스킵된 간헐 층의 직전 결과를 승계한다 (P1-1 — 거짓 복구 차단).
     반환: (rows, sent_texts) — 상태보드(D2 슬라이스 ③)가 소비. rows의 layers는
     체크 자체가 죽었으면 빈 리스트.
     """
@@ -29,6 +54,8 @@ def run_pass(sites, st, alert, persist=True, do_render=True):
         results = []
         try:
             results = checks.check_site(site, do_render=do_render)
+            if carry is not None:
+                results = _carry_layers(results, carry.setdefault(key, {}))
             status, reason = state_mod.summarize(results)
         except Exception as exc:
             # 체크 예외도 FAIL 상태로 만들어 알림 경로를 태운다 — 예외를 콘솔에만
@@ -91,11 +118,12 @@ def cmd_watch(sites, args):
     print("순찰 시작 — %d초 간격, 대상 %d개 (중단: Ctrl+C)" % (interval, len(sites)))
     next_run = time.monotonic()
     pass_index = 0
+    carry = {}  # 사이트별 간헐 층 직전 결과 — 스킵 패스의 거짓 복구 차단 (P1-1)
     try:
         while True:
             # 평시엔 L1~L3 위주, 무거운 L4는 N패스마다 1회 (스펙 트리거 설계 —
             # 첫 패스는 포함해 기동 직후 렌더 상태를 확보)
-            rows, sent = run_pass(sites, st, alert=True,
+            rows, sent = run_pass(sites, st, alert=True, carry=carry,
                                   do_render=(pass_index % args.render_every == 0))
             _update_board(rows, sent)
             pass_index += 1
@@ -113,6 +141,11 @@ def cmd_deploy(sites, args):
         print("사이트 키 '%s' 없음 — 사용 가능: %s" % (args.site, ", ".join(sites)))
         sys.exit(2)
     site = sites[args.site]
+    if args.expect and args.expect_version:
+        # 둘 다 주면 한쪽이 조용히 무시돼 "안정" 오보가 난다 (13차 P2-7)
+        print("[사용 오류] --expect와 --expect-version은 함께 쓸 수 없습니다"
+              " (검증 목표는 하나여야 합니다)")
+        sys.exit(2)
     if args.expect_version and not site.get("version_url"):
         print("[설정 오류] --expect-version은 version_url이 있는 사이트에서만 쓸 수 있습니다"
               " (버전 파일이 없으면 앵커를 실측할 수 없음)")

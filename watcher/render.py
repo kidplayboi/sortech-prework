@@ -24,19 +24,26 @@ def check_render(site):
         from playwright.sync_api import Error as PwError
         from playwright.sync_api import sync_playwright
     except ImportError:
-        return {
-            "layer": "L4", "ok": False, "warn": True,
-            "detail": "검증 불가 — Playwright 미설치 (%s)" % INSTALL_HINT,
-        }
+        return _unknown("Playwright 미설치 (%s)" % INSTALL_HINT)
 
     timeout_ms = site.get("timeout_sec", 10) * 1000
     page_errors, console_errors = [], []
     started = time.monotonic()
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            try:
+                # 브라우저 기동 실패(chromium 미설치 등)는 체커 설치 문제다 —
+                # 사이트 장애로 귀속하면 deploy 모드에서 롤백 오보까지 간다
+                # (13차 P2-2: 패키지 부재는 WARN인데 브라우저 부재는 FAIL이던 불일치)
+                browser = p.chromium.launch(headless=True, timeout=timeout_ms)
+            except PwError as exc:
+                return _unknown("브라우저 기동 실패: %s (%s)"
+                                % (_first_line(str(exc)), INSTALL_HINT))
             try:
                 page = browser.new_page()
+                # goto 외 작업(inner_text 등)도 총 시한에 묶는다 — 기본 30초가
+                # timeout_sec 계약을 벗어나던 문제 (13차 P3-5)
+                page.set_default_timeout(timeout_ms)
                 # str(Error)는 메시지만이라 예외 타입명이 빠진다 — stack 첫 줄이
                 # "TypeError: cart is undefined" 형태 (스펙 알림 문구와 일치)
                 page.on("pageerror", lambda e: page_errors.append(_err_repr(e)))
@@ -103,6 +110,12 @@ def fetch_rendered_text(site):
                 browser.close()
     except PwError:
         return None
+
+
+def _unknown(reason):
+    """검증 불가 — 사이트 문제가 아니라 우리 쪽 도구 문제 (13차 P2-2·P2-3)"""
+    return {"layer": "L4", "ok": False, "warn": True, "unknown": True,
+            "detail": "검증 불가 — %s" % reason}
 
 
 def _first_line(text):

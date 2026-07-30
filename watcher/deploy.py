@@ -29,34 +29,60 @@ def run_deploy_watch(key, site, expect=None, expect_version=None, interval=15,
                 % (name, _goal_desc(site, expect, expect_version), interval))
     stable, fails, last_pending, last_detail = 0, 0, None, ""
     while True:
-        verdict, detail = _one_check(site, expect, expect_version)
+        verdict, detail, unknowns = _one_check(site, expect, expect_version)
         last_detail = detail
         print("[deploy] %s · %s" % (verdict, detail))
         if verdict == VERDICT_OK:
             stable += 1
             fails = 0
             if stable >= stable_needed:
-                notify.send("🟢 [%s] 배포 안정 — %s, %d회 연속 전 층 통과 (%d초 소요)"
-                            % (name, detail, stable_needed, int(time.monotonic() - started)))
+                _notify_final(
+                    "🟢 [%s] 배포 안정 — %s, %d회 연속 전 층 통과 (%d초 소요)%s"
+                    % (name, detail, stable_needed, int(time.monotonic() - started),
+                       _unknown_note(unknowns)), sleep)
                 return 0
         elif verdict == VERDICT_PENDING:
             stable = 0
             fails = 0
             if detail != last_pending:  # 같은 사유를 15초마다 반복 통보하지 않는다
-                notify.send("🟠 [%s] 배포 미반영 — %s. 계속 감시" % (name, detail))
-                last_pending = detail
+                if notify.send("🟠 [%s] 배포 미반영 — %s. 계속 감시" % (name, detail)):
+                    last_pending = detail  # 전송 성공 시에만 소거 — 실패면 다시 시도 (H-C)
         else:
             stable = 0
             fails += 1
             if fails >= stable_needed:
-                notify.send("🔴 [%s] 배포 검증 실패 — %s · %d회 연속. 롤백 검토 필요"
-                            % (name, detail, fails))
+                _notify_final("🔴 [%s] 배포 검증 실패 — %s · %d회 연속. 롤백 검토 필요"
+                              % (name, detail, fails), sleep)
                 return 1
-        if time.monotonic() > deadline:
-            notify.send("🔴 [%s] 배포 검증 시간 초과(%d초) — 마지막 상태: %s"
-                        % (name, max_wait, last_detail))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _notify_final("🔴 [%s] 배포 검증 시간 초과(%d초) — 마지막 상태: %s"
+                          % (name, max_wait, last_detail), sleep)
             return 1
-        sleep(interval)
+        # 초과폭을 interval만큼 넘기지 않게 남은 시간으로 자른다 (13차 P3-1)
+        sleep(min(interval, max(0, remaining)))
+
+
+def _notify_final(text, sleep, attempts=3, retry_sec=5):
+    """종말 통보(안정/실패/시간초과)는 전송 성공까지 재시도한다 — 모듈 계약이
+    "결과를 반드시 1회 보고"이므로 한 번 실패로 무통보 종료하면 계약 위반이다
+    (13차 P2-4). 끝까지 실패하면 콘솔에 명시하고 종료코드로 결과를 전한다."""
+    for attempt in range(attempts):
+        if notify.send(text):
+            return True
+        if attempt < attempts - 1:
+            print("[deploy] 결과 통보 실패 — %d초 후 재시도 (%d/%d)"
+                  % (retry_sec, attempt + 1, attempts))
+            sleep(retry_sec)
+    print("[deploy] ⚠️ 결과 통보를 %d회 모두 실패했습니다. 결과: %s" % (attempts, text))
+    return False
+
+
+def _unknown_note(unknowns):
+    """안정 판정을 막지는 않되 무엇을 확인하지 못했는지는 반드시 부기한다"""
+    if not unknowns:
+        return ""
+    return " · 미확인 항목: %s" % "; ".join(unknowns)
 
 
 def _goal_desc(site, expect, expect_version):
@@ -71,30 +97,38 @@ def _goal_desc(site, expect, expect_version):
 
 
 def _one_check(site, expect, expect_version):
-    """한 번의 집중 체크 → (verdict, detail).
+    """한 번의 집중 체크 → (verdict, detail, unknown_notes).
 
     L3(버전 목표)는 이 모듈이 앵커 의미론으로 직접 판정한다 — 층 검증은
     version_url을 뗀 사본으로 돌려 이중 조회를 막는다. L4는 배포 직후가
     최위험이라 매 체크 포함 (평시 --render-every 간헐과 다름 — 스펙 §트리거).
+
+    **"검증 불가"(unknown)는 미반영과 다르다** — 도구 미설치·키 미설정은 사이트
+    상태가 아니므로 안정 판정을 막지 않고 결과 문구에만 부기한다. 이걸 pending으로
+    묶으면 건강한 배포가 10분 뒤 "시간 초과 실패"로 오보된다 (13차 P2-3).
     """
     probe = dict(site)
     probe.pop("version_url", None)
     results = checks.check_site(probe, do_render=site.get("render") is True)
+    unknowns = ["%s %s" % (r["layer"], r["detail"]) for r in results if r.get("unknown")]
     hard = [r for r in results if not r["ok"] and not r.get("warn")]
     if hard:
-        return VERDICT_FAIL, "%s %s" % (hard[0]["layer"], hard[0]["detail"])
-    warns = [r for r in results if not r["ok"] and r.get("warn")]
+        return VERDICT_FAIL, "%s %s" % (hard[0]["layer"], hard[0]["detail"]), unknowns
+    warns = [r for r in results
+             if not r["ok"] and r.get("warn") and not r.get("unknown")]
     if warns:
         # 안정 판정은 깨끗한 통과만 센다 — warn은 실패도, 안정도 아니다
-        return VERDICT_PENDING, "%s %s" % (warns[0]["layer"], warns[0]["detail"])
+        return VERDICT_PENDING, "%s %s" % (warns[0]["layer"], warns[0]["detail"]), unknowns
 
     if expect_version:
-        return _version_goal(site, expect_version)
-    if expect:
-        return _expect_goal(site, expect)
-    if site.get("version_url"):
-        return _match_goal(site)
-    return VERDICT_OK, " · ".join("%s ✓" % r["layer"] for r in results)
+        verdict, detail = _version_goal(site, expect_version)
+    elif expect:
+        verdict, detail = _expect_goal(site, expect)
+    elif site.get("version_url"):
+        verdict, detail = _match_goal(site)
+    else:
+        verdict, detail = VERDICT_OK, " · ".join("%s ✓" % r["layer"] for r in results)
+    return verdict, detail, unknowns
 
 
 def _version_goal(site, anchor):

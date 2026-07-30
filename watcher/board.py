@@ -15,7 +15,6 @@ from .config import BOARD_HISTORY_PATH, BOARD_PATH
 
 HISTORY_MAX = 20
 SHOW_ALERTS = 8
-DOT_COLOR = {"OK": "#1a7f37", "WARN": "#b45309", "FAIL": "#b91c1c"}
 DOT_CHAR = {"OK": "🟢", "WARN": "🟠", "FAIL": "🔴"}
 
 _CSS = """
@@ -54,8 +53,12 @@ def _append_history(sent_texts, now):
         try:
             loaded = json.loads(BOARD_HISTORY_PATH.read_text(encoding="utf-8"))
             if isinstance(loaded, list):
+                # ts 타입까지 검사 — 문자열 ts 하나가 time.localtime에서 TypeError를
+                # 내고 그 엔트리가 다시 저장돼 이후 보드 갱신이 영구 실패했다 (13차 P3-3)
                 history = [e for e in loaded
-                           if isinstance(e, dict) and isinstance(e.get("text"), str)]
+                           if isinstance(e, dict) and isinstance(e.get("text"), str)
+                           and isinstance(e.get("ts"), int)
+                           and not isinstance(e.get("ts"), bool)]
         except (json.JSONDecodeError, OSError):
             history = []  # 손상 이력은 버리고 진행 — 보드가 감시를 막으면 안 된다
     for text in sent_texts:

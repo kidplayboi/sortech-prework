@@ -36,6 +36,12 @@ READ1_CHUNK = 65536  # size cap 오버슈트 상한 = 이 값 — 본문이 상�
 
 
 def check_site(site, do_render=True):
+    """층 결과 리스트를 반환한다. 결과 dict 계약:
+    ok=True 통과 / ok=False+warn=True 주의 / ok=False 장애 /
+    **unknown=True = "검증 불가"** (도구 미설치·키 미설정 등 — 사이트 문제가 아니다.
+    13차 게이트 P2-2·P2-3: 이걸 실패와 섞으면 체커 설치 문제가 사이트 장애로
+    오귀속되고 배포 안정 판정이 영구 불가가 된다)
+    """
     results = []
 
     l1, body, headers, truncated = _l1_alive(site)
@@ -43,7 +49,16 @@ def check_site(site, do_render=True):
     if not l1["ok"]:
         return results
 
+    render_on = site.get("render") is True
     l2 = _l2_content(site, body, headers, truncated)
+    # render:true면 마커 판정 권한을 L4(렌더된 화면)로 넘긴다 — 원문에 마커가 없는
+    # 정상 SPA를 L2가 선점해 영구 🔴으로 만들던 결함 교정 (13차 P2-1).
+    # 위임하면 L4를 반드시 돌려야 한다(권한을 안 도는 층에 넘길 수 없다) →
+    # do_render 스킵도 이 경우엔 무시하고 강제 실행한다.
+    deferred = render_on and l2.get("marker_missing") and not l2.get("truncated_body")
+    if deferred:
+        l2 = {"layer": "L2", "ok": True,
+              "detail": "원문에 마커 없음 — 렌더 후 검증(L4)에 위임"}
     results.append(l2)
     if not l2["ok"]:
         return results
@@ -51,21 +66,35 @@ def check_site(site, do_render=True):
     if site.get("version_url"):
         results.append(_l3_deploy(site))
 
-    if do_render and site.get("render") is True:
+    if render_on and (do_render or deferred):
         # 하드 FAIL(비-warn)이 이미 있으면 무거운 L4를 돌려 확정 장애 알림을
         # 지연시키지 않는다 (앞 층 FAIL=뒤 층 생략 원칙의 연장). warn(L3 미반영
         # 등)은 렌더 확인이 오히려 유의미하므로 진행
-        if not any(not r["ok"] and not r.get("warn") for r in results):
+        if not _has_hard_fail(results):
             from . import render  # 지연 임포트 — Playwright 없는 설치에서도 L1~L3 동작
 
-            results.append(render.check_render(site))
+            l4 = render.check_render(site)
+            if deferred and l4.get("unknown"):
+                # 위임했는데 심판이 없다 — 조용한 검증 공백을 만들지 않고
+                # 두 사실을 합쳐 정직하게 장애로 보고한다
+                results[-1] = {
+                    "layer": "L2", "ok": False,
+                    "detail": "원문에 핵심 내용 없음 + 렌더 검증 불가(%s)" % l4["detail"],
+                }
+            results.append(l4)
 
     if site.get("security") is True:
-        from . import security  # 지연 임포트 — 층별 모듈 독립성 유지
+        # L4와 같은 게이트 — 확정 장애 뒤에 외부 API·추가 fetch를 쌓지 않는다 (13차 P2-5)
+        if not _has_hard_fail(results):
+            from . import security  # 지연 임포트 — 층별 모듈 독립성 유지
 
-        results.extend(security.check_security(site))
+            results.extend(security.check_security(site))
 
     return results
+
+
+def _has_hard_fail(results):
+    return any(not r["ok"] and not r.get("warn") for r in results)
 
 
 def _bounded_get(url, timeout_sec, ua=UA, referer=None):
@@ -244,6 +273,8 @@ def _l2_content(site, body, headers, truncated=False):
     text = _decode(body, headers)
     missing = [m for m in markers if m not in text]
     if missing:
+        # marker_missing/truncated_body = check_site가 L4 위임 여부를 판단하는 신호
+        # (13차 P2-1). 소비 후 결과에 남지 않는다
         if truncated:
             # 부분 수신 본문에서 마커 부재를 "내용 없음"으로 단정하지 않는다 (N1).
             # 분류는 WARN — '크기 상한으로 잘렸을 뿐'인 사이트에 🔴을 주면 빨간
@@ -253,12 +284,16 @@ def _l2_content(site, body, headers, truncated=False):
                 "layer": "L2",
                 "ok": False,
                 "warn": True,
+                "unknown": True,  # 크기 상한 때문에 못 본 것 = 사이트 문제 아님
+                "marker_missing": True,
+                "truncated_body": True,
                 "detail": "본문 부분 수신(%d바이트 ≥ 상한 %d) — 내용 검증 불가"
                 % (len(body), MAX_BODY_BYTES),
             }
         return {
             "layer": "L2",
             "ok": False,
+            "marker_missing": True,
             "detail": "응답은 200이지만 핵심 내용 없음: %s" % ", ".join(missing),
         }
     return {"layer": "L2", "ok": True, "detail": "마커 %d/%d" % (len(markers), len(markers))}

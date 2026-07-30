@@ -20,12 +20,20 @@ _REQUIRED_KEYS = {"observed", "streak", "confirmed", "confirmed_since",
 
 
 def summarize(results):
-    """계층 결과 목록 → (상태, 대표 사유)"""
+    """계층 결과 목록 → (상태, 대표 사유)
+
+    대표 사유 선정 순위: 장애(FAIL) → 사이트 관련 주의(WARN) → **검증 불가(unknown)**.
+    unknown은 사이트 상태가 아니라 우리 쪽 확인 실패이므로 사이트에 실제로 일어난
+    일을 가리지 않게 맨 뒤로 둔다 (13차 P2-2·P2-3의 등급 분리와 같은 취지).
+    """
     for r in results:
         if not r["ok"] and not r.get("warn"):
             return "FAIL", "%s %s" % (r["layer"], r["detail"])
     for r in results:
-        if not r["ok"] and r.get("warn"):
+        if not r["ok"] and r.get("warn") and not r.get("unknown"):
+            return "WARN", "%s %s" % (r["layer"], r["detail"])
+    for r in results:
+        if not r["ok"] and r.get("unknown"):
             return "WARN", "%s %s" % (r["layer"], r["detail"])
     return "OK", " · ".join("%s %s" % (r["layer"], r["detail"]) for r in results)
 
