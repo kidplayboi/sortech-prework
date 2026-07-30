@@ -27,12 +27,14 @@ GSB_THREATS = ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE",
                "POTENTIALLY_HARMFUL_APPLICATION"]
 GSB_TIMEOUT = 10
 SPAM_MAX_SHOW = 3
-# 히트 확인 표본 설계 (15차 P2-1) — 일반 시점을 **연속 M회** 떠서 결정적 회전의
-# 모든 회차를 덮는다. 연속 M개의 요청 인덱스 {i..i+M-1} mod P는 P<=M이면 전체
-# 잔여류를 포함하므로, 스팸이 어느 회차에 실려 있어도 일반 시점이 반드시 본다.
-# (고정 위치 표본은 P=2N에서 위상이 고정돼 영구 오탐이 났다 — 표본 수를 늘리는
-#  방향이 아니라 "연속 구간으로 전 회차 커버"로 바꾼 것이 핵심)
-USER_SAMPLES = 8      # 회전 주기 <=8까지 구조적으로 커버
+# 히트 확인 표본 설계 (15차 P2-1 → 16차 P2-1 교정) — 일반 시점을 **끊기지 않는
+# 연속 블록**으로 뜬다. 히트 시 실제 요청 배치는
+#   일반(0) 봇(1) │ 일반 2..9 (연속 블록) │ 봇 10, 11
+# 이고, 연속 8개의 요청 인덱스 {2..9} mod P는 P<=8이면 전체 잔여류를 포함하므로
+# 스팸이 어느 회차에 실려 있어도 일반 시점이 반드시 본다(위상 독립).
+# ⚠️봇 표본을 블록 중간에 끼우면 그 요청이 인덱스를 소비해 연속성이 깨지고
+#   근거가 무너진다 — 16차에 주기 4·8·12에서 6/6 오탐으로 실측됐다.
+USER_SAMPLES = 8      # 연속 블록 길이 — 결정적 회전 주기 <=8을 구조적으로 커버
 BOT_SAMPLES = 3       # 봇 시점 표본 — 간헐 클로킹 미탐 완화(1회 이상 노출로 후보 유지)
 
 # 클로킹 심은 페이지에 실제로 박히는 유인 문구들 (도박·성인 스팸 계열).
@@ -60,13 +62,13 @@ def check_cloaking(site):
     마커가 사라지면 WARN(수상한 분기 — 봇 차단 WAF일 수도 있어 단정하지 않는다).
     스팸 문구가 양쪽에 다 있으면 클로킹이 아니라 사이트 자체 성격이므로 통과.
 
-    스팸 히트는 **일반 시점을 연속 USER_SAMPLES회 떠서 그 키워드가 단 한 번도
-    나오지 않을 때만** 확정한다 (15차 P2-1). 고정 위치로 양쪽을 번갈아 뜨는
-    방식은 회전 주기가 총 요청 수와 맞물리면(P=6, 요청 6개) 위상이 매 패스
-    고정돼 영구 오탐이 났다 — 표본 수를 늘려도 P=2N에서 같은 문제가 재발한다.
-    연속 구간으로 전 회차를 덮는 쪽으로 구조를 바꿨다. 봇 조건은 반대로 완화해
-    (1회 이상 노출) 간헐 클로킹 미탐을 줄인다 — 오탐(위상)과 미탐(간헐)을
-    서로 다른 장치로 다룬다 (15차 P3-3).
+    스팸 히트는 **일반 시점을 끊기지 않는 연속 블록으로 USER_SAMPLES회 떠서
+    그 키워드가 단 한 번도 나오지 않을 때만** 확정한다. 고정 위치로 양쪽을
+    번갈아 뜨는 방식은 회전 주기가 총 요청 수와 맞물리면 위상이 매 패스 고정돼
+    영구 오탐이 났고(15차 P2-1), 봇 표본을 블록 중간에 끼우면 그 요청이 인덱스를
+    소비해 연속성 근거 자체가 무너졌다(16차 P2-1 — 주기 4·8·12에서 6/6 오탐).
+    봇 조건은 반대로 완화해(1회 이상 노출) 간헐 클로킹 미탐을 줄인다 —
+    오탐(위상)과 미탐(간헐)을 서로 다른 장치로 다룬다 (15차 P3-3).
     """
     timeout = site.get("timeout_sec", 10)
     keywords = _keywords(site)
@@ -163,17 +165,24 @@ def _confirm_bot_only(site, timeout, candidates, first_bot_text):
     """봇 전용 스팸 후보를 확정/기각한다 (15차 P2-1 재설계).
 
     확정 조건 = 일반 시점 연속 USER_SAMPLES회에 **한 번도** 없고, 봇 시점
-    BOT_SAMPLES회 중 **1회 이상** 노출. 일반 시점 연속 구간이 회전 주기(<=8)의
-    모든 회차를 덮으므로 요청 위상과 무관하게 판정된다.
+    BOT_SAMPLES회 중 **1회 이상** 노출. 요청 배치는
+    `일반(0) 봇(1) │ 일반 2..9 │ 봇 10,11` — 가운데 블록이 연속이라 주기<=8의
+    모든 회차를 덮는다(위상 독립). 이 연속성은 문구가 아니라 테스트가 지킨다
+    (`test_user_samples_are_one_unbroken_block` — 요청 순서를 계측해 단언).
 
     후보가 일반 시점에서 관측되는 순간 즉시 기각하고 남은 표본을 생략한다 —
     회전 사이트에 매 패스 최대 요청을 쏟지 않기 위한 조기 종료 (15차 P3-5).
+    요청 수 실측: 무히트 2 · 조기 기각 4 · 진짜 클로킹(최악) 12.
     반환: {confirmed, user_seen, bot_seen, bot_hits, note}
     """
     remaining = list(candidates)
     bot_hits = {k: 1 for k in remaining}  # 1차 봇 관측 포함
     bot_seen, user_seen = 1, 0
-    for index in range(USER_SAMPLES):
+    # ① 일반 표본을 **끊기지 않는 한 블록**으로 뜬다. 봇 요청을 중간에 끼우면
+    #    그 요청이 인덱스를 소비해 일반 표본이 더 이상 연속이 아니게 되고,
+    #    연속성이 근거였던 위상 독립이 무너진다 (16차 P2-1 — index%3==2에
+    #    봇을 끼운 탓에 주기 4·8·12에서 6/6 오탐, 4와 12는 영구)
+    for _ in range(USER_SAMPLES):
         user_text, note = _fetch_view(site["url"], timeout)
         if note:
             return {"confirmed": [], "user_seen": user_seen, "bot_seen": bot_seen,
@@ -183,17 +192,18 @@ def _confirm_bot_only(site, timeout, candidates, first_bot_text):
         if not remaining:  # 일반 시점에도 있다 = 클로킹 아님 (조기 종료)
             return {"confirmed": [], "user_seen": user_seen, "bot_seen": bot_seen,
                     "bot_hits": 0, "note": ""}
-        # 봇 표본을 일반 표본 사이에 흩어 뜬다 (한 시점만 보고 판단하지 않기 위해)
-        if bot_seen < BOT_SAMPLES and index % 3 == 2:
-            bot_text, note = _fetch_view(site["url"], timeout, ua=BOT_UA,
-                                         referer=SEARCH_REFERER)
-            if note:
-                return {"confirmed": [], "user_seen": user_seen, "bot_seen": bot_seen,
-                        "bot_hits": 0, "note": note}
-            bot_seen += 1
-            for key in remaining:
-                if key in bot_text:
-                    bot_hits[key] += 1
+    # ② 봇 추가 표본은 블록 **밖**(뒤)에서 — 판정 근거 수치를 채우되 일반 블록의
+    #    연속성을 건드리지 않는다
+    while bot_seen < BOT_SAMPLES:
+        bot_text, note = _fetch_view(site["url"], timeout, ua=BOT_UA,
+                                     referer=SEARCH_REFERER)
+        if note:
+            return {"confirmed": [], "user_seen": user_seen, "bot_seen": bot_seen,
+                    "bot_hits": 0, "note": note}
+        bot_seen += 1
+        for key in remaining:
+            if key in bot_text:
+                bot_hits[key] += 1
     confirmed = [k for k in remaining if bot_hits[k] >= 1]
     return {"confirmed": confirmed, "user_seen": user_seen, "bot_seen": bot_seen,
             "bot_hits": max([bot_hits[k] for k in confirmed], default=0), "note": ""}

@@ -19,11 +19,14 @@ CARRY_LAYER_PREFIXES = ("L4", "L5")  # 간헐 실행 층 — 스킵 패스에 �
 
 
 def _layer_rank(layer):
-    """층 실행 순서 — "L5 클로킹"처럼 접미가 붙어도 앞 두 글자로 순위를 뽑는다"""
-    try:
-        return int(layer[1:2])
-    except ValueError:
-        return 99
+    """층 실행 순서 — "L5 클로킹"처럼 접미가 붙어도 숫자 부분으로 순위를 뽑는다.
+    한 글자만 읽으면 L10이 1로 파싱돼 확장 시 억제 순서가 뒤집힌다 (16차 P3-2)."""
+    digits = ""
+    for char in layer[1:]:
+        if not char.isdigit():
+            break
+        digits += char
+    return int(digits) if digits else 99
 
 
 def _carry_layers(results, carried):

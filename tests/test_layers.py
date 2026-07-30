@@ -161,11 +161,30 @@ class CloakingRealServerTest(unittest.TestCase):
         특히 6은 위상 고정으로 6/6 영구 오탐)을 전부 여러 패스 반복해 고정한다.
         고정 위치 표본을 쓰면 어떤 표본 수 N이든 P=2N에서 재발하므로, 취약 주기를
         열거하는 것만으로는 부족하고 판정 구조 자체가 위상 독립이어야 한다."""
-        for path in ("/rotate2", "/rotate3", "/rotate5", "/rotate6", "/rotate7"):
+        for path in ("/rotate2", "/rotate3", "/rotate4", "/rotate5", "/rotate6",
+                     "/rotate7", "/rotate8", "/rotate12"):
             for pass_no in range(4):
                 result = security.check_cloaking(self._site(path))
                 self.assertTrue(result["ok"],
                                 "%s 패스%d: %s" % (path, pass_no, result["detail"]))
+
+    def test_user_samples_are_one_unbroken_block(self):
+        """16차 P2-1의 근거를 직접 단언한다 — 일반 표본이 요청 인덱스 상에서
+        연속이어야 위상 독립이 성립한다. 봇 요청을 블록 중간에 끼우면 이 단언이
+        깨지고 주기 4·8·12 오탐이 되살아난다(서술이 아니라 계측으로 고정)."""
+        order = []
+        real_fetch = security._fetch_view
+
+        def spy(url, timeout, ua=checks.UA, referer=None):
+            order.append("bot" if ua == security.BOT_UA else "user")
+            return real_fetch(url, timeout, ua=ua, referer=referer)
+
+        with mock.patch.object(security, "_fetch_view", side_effect=spy):
+            security.check_cloaking(self._site("/cloak"))  # 진짜 클로킹 = 전 표본 소진
+        user_indexes = [i for i, who in enumerate(order) if who == "user"]
+        block = user_indexes[1:]  # 1차 일반 표본 이후가 확인 블록
+        self.assertEqual(len(block), security.USER_SAMPLES)
+        self.assertEqual(block, list(range(block[0], block[0] + len(block))))
 
     def test_real_cloaking_still_detected(self):
         """반대 방향 — 진짜 클로킹은 여전히 하드 FAIL이어야 한다(탐지력 보존)"""

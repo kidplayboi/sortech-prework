@@ -87,7 +87,7 @@ curl -s -A "Googlebot/2.1" http://127.0.0.1:8899     | grep 바카라   # 나옴
 ## 테스트
 
 ```bash
-python -m unittest discover -s tests   # 77개 — 외부 AI 교차 게이트의 회귀 고정
+python -m unittest discover -s tests   # 78개 — 외부 AI 교차 게이트의 회귀 고정
 ```
 
 ## 알려진 한계 (정직하게)

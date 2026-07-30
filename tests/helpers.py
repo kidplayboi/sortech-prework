@@ -112,10 +112,14 @@ class _RotatingHandler(http.server.BaseHTTPRequestHandler):
     # 15차 P2-1: 취약 구간은 봇/일반 표본 잔여류가 mod P에서 분리되는 P>=5이고,
     # 그중 P=6은 총 요청 수와 맞물려 위상 이동이 0이라 영구 오탐이었다.
     # 잔여류 {1,2,4}에 스팸을 실어 그 조건을 그대로 재현한다.
-    SPAM_RESIDUES = {"/rotate2": {1}, "/rotate3": {1}, "/rotate5": {1, 2, 4},
-                     "/rotate6": {1, 2, 4}, "/rotate7": {1, 2, 4}}
-    PERIODS = {"/rotate2": 2, "/rotate3": 3, "/rotate5": 5, "/rotate6": 6,
-               "/rotate7": 7}
+    # 주기 4·8·12는 16차에 6/6 오탐(4·12는 영구)이 실측된 구간 — 봇 표본이
+    # 일반 블록 중간에 끼어 연속성을 깨뜨렸을 때 정확히 뚫리는 주기들이다
+    SPAM_RESIDUES = {"/rotate2": {1}, "/rotate3": {1}, "/rotate4": {1},
+                     "/rotate5": {1, 2, 4}, "/rotate6": {1, 2, 4},
+                     "/rotate7": {1, 2, 4}, "/rotate8": {1, 5},
+                     "/rotate12": {1, 5, 9}}
+    PERIODS = {"/rotate2": 2, "/rotate3": 3, "/rotate4": 4, "/rotate5": 5,
+               "/rotate6": 6, "/rotate7": 7, "/rotate8": 8, "/rotate12": 12}
 
     def do_GET(self):
         path = self.path.split("?")[0]
