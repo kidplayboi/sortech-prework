@@ -5,7 +5,7 @@ import os
 import sys
 import time
 
-from . import checks, deploy as deploy_mod, notify, state as state_mod
+from . import board, checks, deploy as deploy_mod, notify, state as state_mod
 from .config import load_env, load_sites, validate_sites
 
 DOT = {"OK": "\U0001f7e2", "WARN": "\U0001f7e0", "FAIL": "\U0001f534"}
@@ -21,8 +21,12 @@ def run_pass(sites, st, alert, persist=True, do_render=True):
     alert=False(status 명령)면 state를 읽지도 쓰지도 않는다 — 조회가 전이를
     소비해 장애 알림이 증발하던 문제(P1-2)의 교정.
     do_render=False면 이 패스에서 L4(무거움)를 생략 — watch의 --render-every 주기.
+    반환: (rows, sent_texts) — 상태보드(D2 슬라이스 ③)가 소비. rows의 layers는
+    체크 자체가 죽었으면 빈 리스트.
     """
+    rows, sent_texts = [], []
     for key, site in sites.items():
+        results = []
         try:
             results = checks.check_site(site, do_render=do_render)
             status, reason = state_mod.summarize(results)
@@ -31,6 +35,8 @@ def run_pass(sites, st, alert, persist=True, do_render=True):
             # 남기면 그 사이트는 영구 무감시·무알림이 된다 (3차 게이트 G2 교정)
             status, reason = "FAIL", "체크 자체 실패: %s" % type(exc).__name__
         print("%s [%s] %s %s" % (_now(), site.get("name", key), DOT[status], reason))
+        rows.append({"key": key, "name": site.get("name", key),
+                     "status": status, "reason": reason, "layers": results})
         if not alert:
             continue
         try:  # 상태·알림 단계도 사이트별 격리 (N3)
@@ -40,32 +46,43 @@ def run_pass(sites, st, alert, persist=True, do_render=True):
             # 현재 진행 중인 장애를 먼저 — 과거 순단의 사후 보고가 지금의 🔴을
             # 선점하면 안 된다 (K-C: elif 구조였을 때 1인터벌 지연·once 1회 누락)
             if obs["status"] is not None and obs["status"] != obs["prev_notified"]:
-                sent = notify.send(
-                    notify.fmt_transition(
-                        site.get("name", key), obs["status"], obs["reason"],
-                        obs["prev_notified"], obs["duration_sec"],
-                    )
+                text = notify.fmt_transition(
+                    site.get("name", key), obs["status"], obs["reason"],
+                    obs["prev_notified"], obs["duration_sec"],
                 )
-                if sent:
+                if notify.send(text):
                     state_mod.mark_notified(st, key)
+                    sent_texts.append(text)
             if obs.get("missed_reason"):
-                if notify.send(notify.fmt_missed(
-                        site.get("name", key), obs["missed_reason"],
-                        obs.get("missed_duration", 0))):
+                text = notify.fmt_missed(
+                    site.get("name", key), obs["missed_reason"],
+                    obs.get("missed_duration", 0))
+                if notify.send(text):
                     state_mod.clear_missed(st, key)  # 전달 성공 시에만 소거 — 실패면 재시도 (H-C)
+                    sent_texts.append(text)
         except Exception as exc:
             print("%s [%s] ⚠️ 상태 처리 실패: %s" % (_now(), site.get("name", key), type(exc).__name__))
     if alert and persist:
         state_mod.save_state(st)
+    return rows, sent_texts
 
 
 def cmd_status(sites, _args):
-    run_pass(sites, {}, alert=False)
+    run_pass(sites, {}, alert=False)  # 읽기 전용 계약 — 보드 파일도 쓰지 않는다
+
+
+def _update_board(rows, sent_texts):
+    """보드 생성 실패가 감시를 죽이면 안 된다 — 격리 후 경고만 (가용성 우선)"""
+    try:
+        board.update_board(rows, sent_texts)
+    except Exception as exc:
+        print("[경고] 상태보드 갱신 실패: %s" % type(exc).__name__)
 
 
 def cmd_once(sites, _args):
     st = state_mod.load_state()
-    run_pass(sites, st, alert=True)
+    rows, sent = run_pass(sites, st, alert=True)
+    _update_board(rows, sent)
 
 
 def cmd_watch(sites, args):
@@ -78,8 +95,9 @@ def cmd_watch(sites, args):
         while True:
             # 평시엔 L1~L3 위주, 무거운 L4는 N패스마다 1회 (스펙 트리거 설계 —
             # 첫 패스는 포함해 기동 직후 렌더 상태를 확보)
-            run_pass(sites, st, alert=True,
-                     do_render=(pass_index % args.render_every == 0))
+            rows, sent = run_pass(sites, st, alert=True,
+                                  do_render=(pass_index % args.render_every == 0))
+            _update_board(rows, sent)
             pass_index += 1
             next_run += interval
             if next_run < time.monotonic():

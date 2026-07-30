@@ -7,7 +7,11 @@ import contextlib
 import gzip
 import http.server
 import io
+import json
+import pathlib
+import shutil
 import socketserver
+import tempfile
 import threading
 import time
 import unittest
@@ -15,7 +19,7 @@ from unittest import mock
 
 import requests
 
-from watcher import checks, deploy, notify, state as state_mod
+from watcher import board, checks, deploy, notify, state as state_mod
 from watcher.cli import run_pass
 from watcher.config import validate_sites as checks_validate
 
@@ -532,6 +536,57 @@ class BoundedGetIntegrationTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(truncated)
         self.assertGreaterEqual(len(body), 1000)
+
+
+class BoardTest(unittest.TestCase):
+    """정적 상태보드 (D2 슬라이스 ③) — 파일 생성·escape·이력 상한"""
+
+    def setUp(self):
+        self.dir = pathlib.Path(tempfile.mkdtemp())
+        self.board = self.dir / "board.html"
+        self.history = self.dir / "board_history.json"
+        self.patches = [
+            mock.patch.object(board, "BOARD_PATH", self.board),
+            mock.patch.object(board, "BOARD_HISTORY_PATH", self.history),
+        ]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _row(self, **kw):
+        row = {"key": "s", "name": "데모샵", "status": "OK", "reason": "정상",
+               "layers": [{"layer": "L1", "ok": True, "detail": "HTTP 200 · 10ms"}]}
+        row.update(kw)
+        return row
+
+    def test_board_written_with_status_and_layers(self):
+        board.update_board([self._row()], ["🟢 [데모샵] 회복"])
+        html_text = self.board.read_text(encoding="utf-8")
+        self.assertIn("데모샵", html_text)
+        self.assertIn("HTTP 200", html_text)
+        self.assertIn("회복", html_text)
+
+    def test_dynamic_text_is_escaped(self):
+        """사이트 응답에서 유래한 문구가 보드 안에서 마크업으로 살면 안 된다"""
+        row = self._row(reason="<script>alert(1)</script>",
+                        layers=[{"layer": "L2", "ok": False,
+                                 "detail": "없음: <img src=x onerror=alert(1)>"}])
+        board.update_board([row], ["🔴 <script>x</script>"])
+        html_text = self.board.read_text(encoding="utf-8")
+        self.assertNotIn("<script>alert(1)</script>", html_text)
+        self.assertNotIn("<img src=x", html_text)
+        self.assertIn("&lt;script&gt;", html_text)
+
+    def test_history_capped(self):
+        for i in range(30):
+            board.update_board([self._row()], ["알림 %d" % i])
+        history = json.loads(self.history.read_text(encoding="utf-8"))
+        self.assertEqual(len(history), board.HISTORY_MAX)
+        self.assertEqual(history[-1]["text"], "알림 29")  # 최신이 남고 옛것이 밀린다
 
 
 class DeployModeTest(unittest.TestCase):

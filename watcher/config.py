@@ -6,6 +6,8 @@ import pathlib
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SITES_PATH = ROOT / "sites.json"
 STATE_PATH = ROOT / "state.json"
+BOARD_PATH = ROOT / "board.html"
+BOARD_HISTORY_PATH = ROOT / "board_history.json"
 
 
 def load_env():

@@ -8,4 +8,8 @@ __pycache__/
 Thumbs.db
 state.json
 state.json.tmp
+board.html
+board.html.tmp
+board_history.json
+board_history.json.tmp
 !.env.example

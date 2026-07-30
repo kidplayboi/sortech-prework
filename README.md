@@ -42,6 +42,8 @@ python -m watcher deploy my-site --expect "여름세일"         # 서버를 못
 
 앵커가 왜 필요한가: "원본=사용자 일치"만 보면 **배포가 서버에 아예 닿지 않아 둘 다 옛 버전**인 상태도 정상으로 보인다. `--expect-version`은 원본·사용자 모두 그 값일 때만 안정으로 판정한다.
 
+**상태보드**: `watch`/`once`가 매 패스마다 `board.html` 한 장을 갱신한다 — 서버 없이 브라우저로 열기만 하면 되는 전 사이트 현황판 (15초 자동 새로고침, 최근 알림 이력 포함). `status`는 읽기 전용 계약이라 보드도 쓰지 않는다.
+
 ## 설정
 
 `sites.json` — 감시 대상 (이 레포의 값이 실제 동작 예시):
@@ -72,7 +74,7 @@ python -m watcher deploy my-site --expect "여름세일"         # 서버를 못
 ## 테스트
 
 ```bash
-python -m unittest discover -s tests   # 49개 — 외부 AI 교차 게이트의 회귀 고정
+python -m unittest discover -s tests   # 52개 — 외부 AI 교차 게이트의 회귀 고정
 ```
 
 ## 알려진 한계 (정직하게)
