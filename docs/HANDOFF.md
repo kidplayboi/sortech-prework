@@ -1,11 +1,11 @@
 # HANDOFF — 세션 재개용 (컴팩 대비)
 
 > 재개 절차: **이 문서 → `MASTER-TRACKER.md` → `01-스펙.md`** 순서로 읽는다.
-> 재개 직후 검증: `python -m unittest discover -s tests`(33개, 동시성 확인은 반복 실행) + `python -m watcher status`
+> 재개 직후 검증: `python -m unittest discover -s tests`(35개, 동시성 확인은 반복 실행) + `python -m watcher status`
 
 ## 스냅샷 (2026-07-30)
 
-- **D1 완료**: 감지 L1~L3(생존/내용/배포반영) + 상태·알림 엔진(관측/통보 분리, 플랩 방지, 순단 사후 보고) + CLI(`status`·`once`·`watch`) + 테스트 33개 + README 완비
+- **D1 완료**: 감지 L1~L3(생존/내용/배포반영) + 상태·알림 엔진(관측/통보 분리, 플랩 방지, 순단 사후 보고) + CLI(`status`·`once`·`watch`) + 테스트 35개 + README 완비
 - **Codex 교차 게이트 8라운드 PASS** (P1 0 · P2 0) — 판정·수리·결산 전문 = `docs/audits/2026-07-29-codex-gate-D1.md`
 - 감시 대상 데모 사이트 라이브: https://kidplayboi.github.io/deploy-watcher-demo/ (v1.0.1, 별도 공개 레포)
 - 텔레그램 실채널 연결·발송 검증 완료 (자격 정보는 로컬 `.env` 전용 — 레포 미포함, 형식은 `.env.example`)
@@ -39,7 +39,7 @@
 
 - 예외→상태 매핑을 공통화해 "예외가 알림 경로에서 이탈"(G2) 패턴 재발 방지
 - 비동기 정리 검증 테스트는 상한/이름표 단언 (M-A 교훈 — 동기 수렴 단언은 필연적 flaky)
-- 수용된 한계 4항 = README '알려진 한계' (문서화된 트레이드오프 — 몰래 재개봉 금지, 필요 시 명시 재논의)
+- 수용된 한계 = README '알려진 한계' 3항 (문서화된 트레이드오프 — 몰래 재개봉 금지, 필요 시 명시 재논의). 트리클 항목은 2026-07-30 회의의 명시 재논의를 거쳐 9차에서 수리·삭제됨
 
 ## 남은 단계 (MASTER-TRACKER 5~10)
 

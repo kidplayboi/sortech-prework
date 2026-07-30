@@ -13,10 +13,19 @@ import time
 import urllib.parse
 
 import requests
+import urllib3.response
+
+if not hasattr(urllib3.response.HTTPResponse, "read1"):  # urllib3 < 2.0
+    # read1(수신 즉시 반환 읽기)이 없으면 트리클 워커 자가 종료(9차 N-A 수리)가
+    # 성립하지 않는다 — 조용히 열화하는 대신 시작을 거부한다 (설정 오류로 취급)
+    raise ImportError(
+        "urllib3 2.x 필요 (HTTPResponse.read1) — requirements.txt 재설치 필요"
+    )
 
 UA = "deploy-watcher/0.1 (+https://github.com/kidplayboi/sortech-prework)"
 MAX_BODY_BYTES = 2_000_000
 VERSION_MAX_LEN = 64
+READ1_CHUNK = 65536
 
 
 def check_site(site):
@@ -42,11 +51,11 @@ def _bounded_get(url, timeout_sec):
     """총 시한·크기 상한이 있는 GET. 반환: (status_code, body_bytes, headers, truncated)
 
     - 총 시한: 데몬 워커 스레드 + join(timeout)으로 강제한다. 시한 초과 시 호출자는
-      requests.Timeout을 즉시 받는다. 워커 회수는 3중 구조 — close() 위임(best-effort)
-      + 무응답 시 read timeout + 데이터가 흐르는 동안엔 청크마다 인라인 데드라인
-      자가 종료. 단, 바이트 단위로 계속 흘리는 병적 트리클은 단일 read가 길어져
-      회수가 매우 오래 지연되거나 사실상 되지 않을 수 있다(데몬이라 프로세스
-      종료는 막지 않는다 — 7·8차 N-A, README '알려진 한계' 참조).
+      requests.Timeout을 즉시 받는다. 워커 회수: 읽기가 read1(한 번의 수신이 도착하는
+      즉시 반환)이라 데이터가 흐르는 한 매 수신마다 데드라인을 확인하고 자가 종료한다
+      — 바이트 단위 트리클도 시한 직후 회수된다 (9차 게이트 N-A 수리, 7·8차의
+      "회수 안 될 수 있음" 한계를 대체). 무응답 구간은 read timeout이 끊는다.
+      남는 한계는 응답 헤더 단계에서 정체하는 서버(K-B)뿐 — README '알려진 한계'.
     - truncated=True는 '크기 상한으로 잘린 부분 본문'을 뜻한다 — 이 신호 없이
       부분 본문을 정상 응답처럼 반환하면 멀쩡한 페이지가 오탐된다 (2차 N1 교정).
     """
@@ -62,11 +71,15 @@ def _bounded_get(url, timeout_sec):
             holder["resp"] = resp  # 시한 초과 시 정리 위임 스레드가 close()할 수 있게 공유
             chunks, size, truncated = [], 0, False
             with resp:  # 예외 경로에서도 커넥션 반환 (N11)
-                for chunk in resp.iter_content(1024):
+                while True:
                     if time.monotonic() > deadline:
-                        # 데이터가 흐르는 트리클에서는 read timeout이 안 걸린다 —
-                        # 워커가 스스로 종료해 누수를 막는다 (7차 N-A)
+                        # read1은 수신이 올 때마다 반환하므로 이 검사가 매 수신마다
+                        # 실행된다 — iter_content(1024)는 1024바이트가 모일 때까지
+                        # 블록해 바이트 트리클에서 워커가 수십 초 생존했다 (N-A 수리)
                         raise requests.Timeout("총 시한 초과(워커 자가 종료)")
+                    chunk = resp.raw.read1(READ1_CHUNK, decode_content=True)
+                    if not chunk:  # b"" = EOF (read1은 압축 해제 결과가 비면 내부 재시도)
+                        break
                     chunks.append(chunk)
                     size += len(chunk)
                     if size > MAX_BODY_BYTES:
@@ -87,13 +100,12 @@ def _bounded_get(url, timeout_sec):
         if resp is not None:
             # close()는 워커의 in-flight read가 끝나기를 기다리며 수 초 블록할 수
             # 있음이 계측됐다 (5차 게이트 K-A — 메인에서 동기 호출하면 시한이 다시
-            # 깨진다). 데몬 스레드에 위임해 메인은 즉시 복귀하고, 회수는 best-effort로
-            # 앞당긴다. 회수는 close 위임·read timeout·인라인 데드라인의 조합이며,
-            # 병적 트리클에선 사실상 안 될 수도 있다 (README '알려진 한계').
+            # 깨진다). 데몬 스레드에 위임해 메인은 즉시 복귀한다. 워커 자체는
+            # 수신 중이면 read1 데드라인, 무응답이면 read timeout으로 자가 종료한다.
             threading.Thread(target=resp.close, daemon=True, name="watcher-close").start()
-        # 알려진 한계 (K-B): 응답 헤더 단계에서 멈추는 병적 서버는 requests.get()이
+        # 알려진 한계 (K-B): 응답 헤더 단계에서 정체하는 병적 서버는 requests.get()이
         # 반환하지 않아 holder가 비고, 닫을 핸들 자체가 없다. 워커는 데몬이라
-        # 프로세스 종료는 막지 않지만, 서버가 계속 흘리는 한 회수는 사실상 안 될 수 있다.
+        # 프로세스 종료는 막지 않지만, 헤더가 계속 찔끔 오는 한 회수는 늦어질 수 있다.
         raise requests.Timeout("총 시한 %d초 초과" % timeout_sec)
     if "exc" in result:
         raise result["exc"]

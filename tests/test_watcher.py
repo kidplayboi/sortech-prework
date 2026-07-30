@@ -4,6 +4,7 @@ P1 구조 결함 3종(첫관측 무알림·status의 전이 소비·전송실패
 P1-1 인코딩 오탐, P3 파싱류가 되돌아오지 않는지 고정한다.
 """
 import contextlib
+import gzip
 import http.server
 import io
 import socketserver
@@ -278,6 +279,28 @@ class _DemoHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
+        if self.path.startswith("/gzip"):
+            data = gzip.compress("압축응답 마커".encode("utf-8"))
+            self.send_response(200)
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if self.path.startswith("/drip"):
+            # 바이트 단위 병적 트리클 (9차 N-A). 400회×0.05초=20초 안전 상한 —
+            # 단언 상한(3초)보다 훨씬 길어 옛 코드의 누수를 가리지 못한다
+            self.send_response(200)
+            self.send_header("Content-Length", "100000")
+            self.end_headers()
+            try:
+                for _ in range(400):
+                    self.wfile.write(b"z")
+                    self.wfile.flush()
+                    time.sleep(0.05)
+            except OSError:
+                pass
+            return
         self.send_response(200)
         self.send_header("Content-Length", "80000")
         self.end_headers()
@@ -324,6 +347,31 @@ class BoundedGetIntegrationTest(unittest.TestCase):
         while self._watcher_threads() and time.monotonic() < deadline:
             time.sleep(0.1)
         self.assertEqual(self._watcher_threads(), [])
+
+    def test_byte_trickle_worker_self_terminates(self):
+        """9차 N-A 수리: 바이트 단위 트리클에서도 워커가 시한 직후 자가 종료한다.
+
+        수리 전(iter_content 1024)은 read(1024)가 1024바이트를 다 모을 때까지
+        블록해 워커가 수십 초 생존했다 — 3초 상한 폴링이 그 회귀를 고정한다
+        (옛 코드는 서버 안전 상한 20초까지 살아남아 여기서 RED).
+        """
+        started = time.monotonic()
+        with self.assertRaises(requests.RequestException):
+            checks._bounded_get("http://127.0.0.1:%d/drip" % self.port, 1)
+        self.assertLess(time.monotonic() - started, 4)
+        deadline = time.monotonic() + 3
+        while self._watcher_threads() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(self._watcher_threads(), [])
+
+    def test_gzip_body_is_decoded(self):
+        """9차 read1 전환이 압축 해제(decode_content)를 잃지 않는지 고정"""
+        status, body, headers, truncated = checks._bounded_get(
+            "http://127.0.0.1:%d/gzip" % self.port, 5
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(truncated)
+        self.assertIn("압축응답 마커", checks._decode(body, headers))
 
     def test_size_cap_marks_truncated(self):
         with mock.patch.object(checks, "MAX_BODY_BYTES", 1000):
