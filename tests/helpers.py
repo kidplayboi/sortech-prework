@@ -109,20 +109,38 @@ class _RotatingHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"
     ROTATION = {}  # 경로별 요청 카운터 — 클래스 변수로 순차 위상을 만든다
     SPAM = "바카라"
+    # 15차 P2-1: 취약 구간은 봇/일반 표본 잔여류가 mod P에서 분리되는 P>=5이고,
+    # 그중 P=6은 총 요청 수와 맞물려 위상 이동이 0이라 영구 오탐이었다.
+    # 잔여류 {1,2,4}에 스팸을 실어 그 조건을 그대로 재현한다.
+    SPAM_RESIDUES = {"/rotate2": {1}, "/rotate3": {1}, "/rotate5": {1, 2, 4},
+                     "/rotate6": {1, 2, 4}, "/rotate7": {1, 2, 4}}
+    PERIODS = {"/rotate2": 2, "/rotate3": 3, "/rotate5": 5, "/rotate6": 6,
+               "/rotate7": 7}
 
     def do_GET(self):
         path = self.path.split("?")[0]
         ua = (self.headers.get("User-Agent") or "").lower()
+        is_bot = "googlebot" in ua
         if path == "/cloak":
-            body = "데모샵 장바구니" + (" %s 카지노" % self.SPAM
-                                     if "googlebot" in ua else "")
+            body = "데모샵 장바구니" + (" %s 카지노" % self.SPAM if is_bot else "")
+        elif path == "/cloak-intermittent":
+            # 진짜 클로커인데 봇에게 간헐 노출(봇 요청 2회 중 1회) — 미탐 위험 측정용.
+            # 카운터를 봇 요청만 세도록 분리한다 — 공용 카운터로 세면 일반 요청이
+            # 위상을 밀어 봇이 스팸을 한 번도 안 보이는 조합이 생긴다(첫 시도의 함정)
+            key = path + ":bot"
+            body = "데모샵 장바구니"
+            if is_bot:
+                index = self.ROTATION.get(key, 0)
+                self.ROTATION[key] = index + 1
+                if index % 2 == 0:
+                    body += " %s 카지노" % self.SPAM
         else:
-            period = 3 if path == "/rotate3" else 2
+            period = self.PERIODS.get(path, 2)
             index = self.ROTATION.get(path, 0)
             self.ROTATION[path] = index + 1
-            # 회차 1(주기 2) / 회차 1(주기 3)에만 스팸 단어가 실린 배너가 뜬다
+            # 정상 사이트인데 배너가 순차 회전한다 — 특정 회차에만 스팸 단어가 실림
             body = "데모샵 장바구니 배너%d" % (index % period)
-            if index % period == 1:
+            if index % period in self.SPAM_RESIDUES.get(path, {1}):
                 body += " %s 이벤트" % self.SPAM
         data = body.encode("utf-8")
         self.send_response(200)

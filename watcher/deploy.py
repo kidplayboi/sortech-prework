@@ -17,6 +17,11 @@ import requests
 from . import checks, notify
 
 VERDICT_OK, VERDICT_PENDING, VERDICT_FAIL = "ok", "pending", "fail"
+# 종료코드: 0=전 층 검증 후 안정 · 1=실패/시간초과 · 3=안정이지만 **핵심 층 미검증**
+# (render:true인데 브라우저가 없어 L4를 못 돌린 경우 등 — 13차 P2-3대로 배포를
+#  막지는 않되, CI가 "완전 통과"와 구분할 수 있게 코드를 나눈다. 15차 P3-4)
+EXIT_STABLE, EXIT_FAIL, EXIT_STABLE_UNVERIFIED = 0, 1, 3
+CORE_UNVERIFIED_LAYERS = ("L2", "L4")  # 사이트 내용 검증의 본체
 
 
 def run_deploy_watch(key, site, expect=None, expect_version=None, interval=15,
@@ -36,11 +41,13 @@ def run_deploy_watch(key, site, expect=None, expect_version=None, interval=15,
             stable += 1
             fails = 0
             if stable >= stable_needed:
+                core_gap = [u for u in unknowns if u.startswith(CORE_UNVERIFIED_LAYERS)]
+                head = "배포 안정(핵심 층 미검증)" if core_gap else "배포 안정"
                 _notify_final(
-                    "🟢 [%s] 배포 안정 — %s, %d회 연속 전 층 통과 (%d초 소요)%s"
-                    % (name, detail, stable_needed, int(time.monotonic() - started),
-                       _unknown_note(unknowns)), sleep)
-                return 0
+                    "🟢 [%s] %s — %s, %d회 연속 통과 (%d초 소요)%s"
+                    % (name, head, detail, stable_needed,
+                       int(time.monotonic() - started), _unknown_note(unknowns)), sleep)
+                return EXIT_STABLE_UNVERIFIED if core_gap else EXIT_STABLE
         elif verdict == VERDICT_PENDING:
             stable = 0
             fails = 0
@@ -53,12 +60,12 @@ def run_deploy_watch(key, site, expect=None, expect_version=None, interval=15,
             if fails >= stable_needed:
                 _notify_final("🔴 [%s] 배포 검증 실패 — %s · %d회 연속. 롤백 검토 필요"
                               % (name, detail, fails), sleep)
-                return 1
+                return EXIT_FAIL
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             _notify_final("🔴 [%s] 배포 검증 시간 초과(%d초) — 마지막 상태: %s"
                           % (name, max_wait, last_detail), sleep)
-            return 1
+            return EXIT_FAIL
         # 초과폭을 interval만큼 넘기지 않게 남은 시간으로 자른다 (13차 P3-1)
         sleep(min(interval, max(0, remaining)))
 

@@ -60,29 +60,33 @@ class SecurityLayerTest(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("특정광고문구", result["detail"])
 
-    def test_rotating_content_spam_is_not_confirmed(self):
-        """13차 P2-6: 요청마다 배너가 도는 사이트 — 1회 차이가 재확인에서 재현되지
-        않으면 최고 강도 문구를 쏘지 않는다 (오탐이 🔴 신뢰를 깎는다)"""
+    def test_rotating_spam_is_rejected_early(self):
+        """13차 P2-6 + 15차 P3-5: 일반 시점 재표본에서 그 문구가 관측되는 순간
+        즉시 기각한다 — 남은 표본까지 다 뜨면 남의 사이트에 매 패스 부담이 된다"""
         seq = iter([
-            ("정상 데모샵", ""),                      # user 1회차
-            ("정상 데모샵 바카라 배너", ""),          # bot 1회차 — 히트
-            ("정상 데모샵 다른배너", ""),             # bot 재표본(순서 반전)
-            ("정상 데모샵", ""),                      # user 재표본
-            ("정상 데모샵 또다른배너", ""),           # bot 3표본
-            ("정상 데모샵", ""),                      # user 3표본
+            ("정상 데모샵", ""),                  # 일반 1차
+            ("정상 데모샵 바카라 배너", ""),      # 봇 1차 — 히트
+            ("정상 데모샵 바카라 배너", ""),      # 일반 재표본 — 여기서 즉시 기각
         ])
-        with mock.patch.object(security, "_fetch_view", side_effect=lambda *a, **k: next(seq)):
+        calls = []
+
+        def fake(url, timeout, ua=checks.UA, referer=None):
+            calls.append(ua)
+            return next(seq)
+
+        with mock.patch.object(security, "_fetch_view", side_effect=fake):
             result = security.check_cloaking(
                 {"url": "http://a.b", "markers": ["데모샵"], "timeout_sec": 5})
         self.assertTrue(result["ok"], result["detail"])
-        self.assertIn("재현되지 않음", result["detail"])
+        self.assertIn("회전 콘텐츠", result["detail"])
+        self.assertEqual(len(calls), 3)  # 조기 종료 — 8표본을 다 뜨지 않는다
 
     def test_repeated_spam_is_confirmed_fail(self):
         """반대 방향 음성 대조 — 2회 연속 재현되면 확정 FAIL이어야 한다"""
         result = self._cloak("정상 데모샵", "정상 데모샵 바카라")
         self.assertFalse(result["ok"])
         self.assertNotIn("warn", result)
-        self.assertIn("교차 표본 전부 재현", result["detail"])
+        self.assertIn("일반 시점 8회 전부 부재", result["detail"])
 
     def test_non_200_view_is_unknown_not_match(self):
         """13차 P3-2: 비200·부분 수신을 '일치'로 통과시키면 거짓 음성"""
@@ -152,16 +156,16 @@ class CloakingRealServerTest(unittest.TestCase):
         return {"url": "http://127.0.0.1:%d%s" % (self.port, path),
                 "markers": ["데모샵"], "timeout_sec": 10}
 
-    def test_sequential_rotation_period2_is_not_flagged(self):
-        """순차 회전(주기 2) — 14차에 8/8 오탐이 나온 조건. 여러 회 반복해도 통과"""
-        for _ in range(4):
-            result = security.check_cloaking(self._site("/rotate2"))
-            self.assertTrue(result["ok"], result["detail"])
-
-    def test_sequential_rotation_period3_is_not_flagged(self):
-        for _ in range(4):
-            result = security.check_cloaking(self._site("/rotate3"))
-            self.assertTrue(result["ok"], result["detail"])
+    def test_sequential_rotation_is_not_flagged_any_period(self):
+        """순차 회전 — 주기 2·3(14차 8/8 오탐)과 **5·6·7**(15차 수학적 취약 구간,
+        특히 6은 위상 고정으로 6/6 영구 오탐)을 전부 여러 패스 반복해 고정한다.
+        고정 위치 표본을 쓰면 어떤 표본 수 N이든 P=2N에서 재발하므로, 취약 주기를
+        열거하는 것만으로는 부족하고 판정 구조 자체가 위상 독립이어야 한다."""
+        for path in ("/rotate2", "/rotate3", "/rotate5", "/rotate6", "/rotate7"):
+            for pass_no in range(4):
+                result = security.check_cloaking(self._site(path))
+                self.assertTrue(result["ok"],
+                                "%s 패스%d: %s" % (path, pass_no, result["detail"]))
 
     def test_real_cloaking_still_detected(self):
         """반대 방향 — 진짜 클로킹은 여전히 하드 FAIL이어야 한다(탐지력 보존)"""
@@ -169,6 +173,33 @@ class CloakingRealServerTest(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertNotIn("warn", result)
         self.assertIn("바카라", result["detail"])
+
+    def test_intermittent_cloaking_still_detected(self):
+        """15차 P3-3: '봇 표본 전부 노출' 조건은 간헐 클로커를 미탐(50%→8%)으로
+        만들었다 — 봇 조건을 1회 이상으로 완화해 잡는다(오탐은 일반 표본이 담당)"""
+        result = security.check_cloaking(self._site("/cloak-intermittent"))
+        self.assertFalse(result["ok"])
+        self.assertIn("바카라", result["detail"])
+
+    def test_rotation_rejection_does_not_hide_marker_loss(self):
+        """15차 P3-1: 스팸이 기각돼도 마커 소실 WARN이 은폐되면 안 된다
+        (14차에 주석만 달고 조기 반환을 남겨둔 것이 재적발됐다)"""
+        site = self._site("/rotate6")
+        site["markers"] = ["장바구니"]
+        seq = iter([
+            ("데모샵 장바구니", ""),                    # 일반 1차
+            ("데모샵 바카라", ""),                      # 봇 1차 — 히트 + 마커 소실
+            ("데모샵 장바구니 바카라", ""),             # 일반 재표본 → 스팸 기각
+        ])
+
+        def fake(url, timeout, ua=checks.UA, referer=None):
+            return next(seq)
+
+        with mock.patch.object(security, "_fetch_view", side_effect=fake):
+            result = security.check_cloaking(site)
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["warn"])
+        self.assertIn("사라짐", result["detail"])
 
 
 class IntermittentLayerTest(unittest.TestCase):

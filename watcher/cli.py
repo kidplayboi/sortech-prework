@@ -18,6 +18,14 @@ def _now():
 CARRY_LAYER_PREFIXES = ("L4", "L5")  # 간헐 실행 층 — 스킵 패스에 직전 결과를 승계
 
 
+def _layer_rank(layer):
+    """층 실행 순서 — "L5 클로킹"처럼 접미가 붙어도 앞 두 글자로 순위를 뽑는다"""
+    try:
+        return int(layer[1:2])
+    except ValueError:
+        return 99
+
+
 def _carry_layers(results, carried):
     """이번 패스에 실행되지 않은 간헐 층의 직전 결과를 이어붙인다.
 
@@ -27,18 +35,24 @@ def _carry_layers(results, carried):
     (모르는 것을 정상으로 치지 않는다). 승계된 항목은 문구에 그 사실을 표시한다.
     """
     seen = {r["layer"] for r in results}
-    # 앞 층이 확정 장애면 뒤 층은 애초에 실행되지 않는다 — 그 자리에 낡은
+    # 앞 층이 확정 장애면 그 뒤 층은 애초에 실행되지 않는다 — 그 자리에 낡은
     # "L4 렌더 정상 (이전 관측)"을 끼워 넣으면 다운된 사이트 옆에 정상 표기가
-    # 나란히 붙는다 (14차 P3-7). 주입만 건너뛰고, 이번에 실제로 돌린 층의
-    # 기록은 그대로 남긴다 — 기록까지 건너뛰면 승계 자체가 사라져 13차 P1-1이
-    # 되살아난다 (이 수리를 넣자마자 회귀 테스트가 잡아낸 지점)
-    if not any(not r["ok"] and not r.get("warn") for r in results):
-        for layer, prev in carried.items():
-            if layer not in seen:
-                merged = dict(prev)
-                if "(이전 관측)" not in merged["detail"]:
-                    merged["detail"] = "%s (이전 관측)" % merged["detail"]
-                results.append(merged)
+    # 나란히 붙는다 (14차 P3-7). 억제는 **실패한 층보다 뒤**로만 한정한다 —
+    # 전체 억제면 L5가 실패한 패스에서 앞서 관측한 L4 장애 정보가 사라진다
+    # (15차 P3-2). 주입만 건너뛰고 이번에 실제로 돌린 층의 기록은 항상 남긴다
+    # (기록까지 건너뛰면 승계가 사라져 13차 P1-1이 되살아난다 — 14차에 적발)
+    fail_rank = min(
+        [_layer_rank(r["layer"]) for r in results
+         if not r["ok"] and not r.get("warn")], default=None)
+    for layer, prev in carried.items():
+        if layer in seen:
+            continue
+        if fail_rank is not None and _layer_rank(layer) > fail_rank:
+            continue
+        merged = dict(prev)
+        if "(이전 관측)" not in merged["detail"]:
+            merged["detail"] = "%s (이전 관측)" % merged["detail"]
+        results.append(merged)
     for r in results:
         if r["layer"].startswith(CARRY_LAYER_PREFIXES) and "(이전 관측)" not in r["detail"]:
             carried[r["layer"]] = r
