@@ -82,6 +82,29 @@ def check_render(site):
     }
 
 
+def fetch_rendered_text(site):
+    """렌더된 body 텍스트 (실패·미설치 시 None) — deploy 모드 기대 문구 확인용.
+    None은 '확인 불가'지 '미출현'이 아니다 — 호출자가 pending으로 다루게 한다."""
+    try:
+        from playwright.sync_api import Error as PwError
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            try:
+                page = browser.new_page()
+                page.goto(site["url"], timeout=site.get("timeout_sec", 10) * 1000,
+                          wait_until="load")
+                page.wait_for_timeout(SETTLE_MS)
+                return page.inner_text("body")
+            finally:
+                browser.close()
+    except PwError:
+        return None
+
+
 def _first_line(text):
     line = text.strip().splitlines()[0] if text.strip() else ""
     return line[:DETAIL_MAX]

@@ -5,7 +5,7 @@ import os
 import sys
 import time
 
-from . import checks, notify, state as state_mod
+from . import checks, deploy as deploy_mod, notify, state as state_mod
 from .config import load_env, load_sites, validate_sites
 
 DOT = {"OK": "\U0001f7e2", "WARN": "\U0001f7e0", "FAIL": "\U0001f534"}
@@ -90,6 +90,21 @@ def cmd_watch(sites, args):
         print("\n순찰 종료")
 
 
+def cmd_deploy(sites, args):
+    if args.site not in sites:
+        print("사이트 키 '%s' 없음 — 사용 가능: %s" % (args.site, ", ".join(sites)))
+        sys.exit(2)
+    site = sites[args.site]
+    if args.expect_version and not site.get("version_url"):
+        print("[설정 오류] --expect-version은 version_url이 있는 사이트에서만 쓸 수 있습니다"
+              " (버전 파일이 없으면 앵커를 실측할 수 없음)")
+        sys.exit(2)
+    sys.exit(deploy_mod.run_deploy_watch(
+        args.site, site, expect=args.expect, expect_version=args.expect_version,
+        interval=args.interval, stable_needed=args.stable, max_wait=args.max_wait,
+    ))
+
+
 def _positive_interval(value):
     interval = int(value)
     if interval < 5:
@@ -129,6 +144,17 @@ def main():
                        help="순찰 간격(초), 기본 300, 최소 5")
     watch.add_argument("--render-every", type=_positive_count, default=5,
                        help="L4 렌더링 검증을 N패스마다 1회 (기본 5, render:true 사이트만)")
+    dep = sub.add_parser("deploy", help="배포 직후 집중 검증 — 안정/실패를 반드시 1회 보고")
+    dep.add_argument("site", help="sites.json의 사이트 키")
+    dep.add_argument("--expect", help="실화면에 나타나야 할 기대 문구 (빌더형 블랙박스용)")
+    dep.add_argument("--expect-version",
+                     help="기대 버전 앵커 — 원본·사용자 모두 이 값이어야 안정 판정")
+    dep.add_argument("--interval", type=_positive_interval, default=15,
+                     help="집중 체크 간격(초), 기본 15, 최소 5")
+    dep.add_argument("--stable", type=_positive_count, default=3,
+                     help="연속 N회 전 층 통과 시 안정 판정 (기본 3)")
+    dep.add_argument("--max-wait", type=_positive_count, default=600,
+                     help="최대 대기(초), 초과 시 실패 보고 (기본 600 — CDN 캐시 여유)")
     args = parser.parse_args()
 
     sites = load_sites()
@@ -145,7 +171,8 @@ def main():
         print("유효한 감시 대상이 없습니다.")
         sys.exit(2)
 
-    {"status": cmd_status, "once": cmd_once, "watch": cmd_watch}[args.command](sites, args)
+    {"status": cmd_status, "once": cmd_once, "watch": cmd_watch,
+     "deploy": cmd_deploy}[args.command](sites, args)
 
 
 if __name__ == "__main__":

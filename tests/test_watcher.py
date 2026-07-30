@@ -15,7 +15,7 @@ from unittest import mock
 
 import requests
 
-from watcher import checks, notify, state as state_mod
+from watcher import checks, deploy, notify, state as state_mod
 from watcher.cli import run_pass
 from watcher.config import validate_sites as checks_validate
 
@@ -532,6 +532,64 @@ class BoundedGetIntegrationTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(truncated)
         self.assertGreaterEqual(len(body), 1000)
+
+
+class DeployModeTest(unittest.TestCase):
+    """배포 집중 모드 (D2 슬라이스 ②) — 판정 루프·앵커 계약·무소식 없음"""
+
+    def _run(self, verdicts, **kw):
+        sent, seq = [], iter(verdicts)
+        with mock.patch.object(deploy, "_one_check", side_effect=lambda *a: next(seq)), \
+             mock.patch.object(notify, "send",
+                               side_effect=lambda t: bool(sent.append(t)) or True), \
+             contextlib.redirect_stdout(io.StringIO()):
+            rc = deploy.run_deploy_watch("s", {"name": "S"}, sleep=lambda _s: None, **kw)
+        return rc, sent
+
+    def test_stable_after_n_clean_passes(self):
+        rc, sent = self._run([(deploy.VERDICT_OK, "d")] * 3)
+        self.assertEqual(rc, 0)
+        self.assertIn("🚀", sent[0])   # 시작 통보 필수
+        self.assertIn("배포 안정", sent[-1])  # 결과 통보 필수 (무소식 없음)
+
+    def test_pending_notified_once_then_stable(self):
+        rc, sent = self._run(
+            [(deploy.VERDICT_PENDING, "아직 1.0.1")] * 3 + [(deploy.VERDICT_OK, "d")] * 3
+        )
+        self.assertEqual(rc, 0)
+        # 같은 미반영 사유 3회 관측 → 통보는 1회 (15초 스팸 금지)
+        self.assertEqual(len([m for m in sent if "미반영" in m]), 1)
+
+    def test_hard_fail_streak_reports_rollback(self):
+        rc, sent = self._run([(deploy.VERDICT_FAIL, "L4 렌더링 에러: TypeError")] * 3)
+        self.assertEqual(rc, 1)
+        self.assertIn("롤백 검토", sent[-1])
+
+    def test_timeout_reports_last_state(self):
+        rc, sent = self._run([(deploy.VERDICT_PENDING, "사용자 화면은 아직 1.0.1")],
+                             max_wait=0)
+        self.assertEqual(rc, 1)
+        self.assertIn("시간 초과", sent[-1])
+        self.assertIn("1.0.1", sent[-1])
+
+    def test_version_anchor_rejects_stale_origin(self):
+        """앵커 계약(기각-2 승계): 원본·사용자가 서로 일치해도 기대 버전이 아니면
+        안정이 아니다 — 배포가 서버에 아예 닿지 않은 상태를 오판하지 않는다"""
+        with mock.patch.object(
+            checks, "_fetch_version",
+            side_effect=lambda site, bust: ("1.0.1", "", "")
+        ):
+            verdict, detail = deploy._version_goal({"version_url": "http://v"}, "1.0.2")
+        self.assertEqual(verdict, deploy.VERDICT_PENDING)
+        self.assertIn("서버에 반영되지 않음", detail)
+
+    def test_version_anchor_ok_when_both_match(self):
+        with mock.patch.object(
+            checks, "_fetch_version",
+            side_effect=lambda site, bust: ("1.0.2", "", "")
+        ):
+            verdict, _detail = deploy._version_goal({"version_url": "http://v"}, "1.0.2")
+        self.assertEqual(verdict, deploy.VERDICT_OK)
 
 
 class RenderLayerTest(unittest.TestCase):

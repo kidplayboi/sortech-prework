@@ -24,7 +24,7 @@
 | L3 배포반영 | 캐시 우회(?nc) vs 사용자 시점 버전 비교 + 캐시 정책(max-age) 실측 | **배포했는데 옛 버전이 보이는 상태** |
 | L4 렌더링 | 헤드리스 브라우저 실렌더 → JS 예외·렌더된 화면의 마커 검증 | **HTML은 오는데 화면이 깨진 상태** — JS 크래시, JS로만 그리는 페이지(SPA)의 내용 증발 |
 
-배포 직후 집중 감시 모드·보안 층(L5)은 빌드 중 — `docs/01-스펙.md`·`docs/04-D2-빌드노트.md` 참조.
+보안 층(L5)은 빌드 중 — `docs/01-스펙.md`·`docs/04-D2-빌드노트.md` 참조.
 
 ## 설치·실행
 
@@ -34,7 +34,13 @@ pip install -r requirements.txt
 python -m watcher status                # 1회 점검, 읽기 전용 (알림·기록 없음)
 python -m watcher once                  # 1회 점검 + 상태 전이 시 알림
 python -m watcher watch --interval 300  # 주기 순찰 (기본 300초, 최소 5초)
+
+# 배포 직후 집중 검증 — 15초 간격, 연속 3회 전 층 통과 시 "배포 안정" (결과 반드시 1회 보고)
+python -m watcher deploy demo-shop --expect-version 1.0.2   # 기대 버전 앵커
+python -m watcher deploy my-site --expect "여름세일"         # 서버를 못 만지는 빌더형 — 실화면 문구로 검증
 ```
+
+앵커가 왜 필요한가: "원본=사용자 일치"만 보면 **배포가 서버에 아예 닿지 않아 둘 다 옛 버전**인 상태도 정상으로 보인다. `--expect-version`은 원본·사용자 모두 그 값일 때만 안정으로 판정한다.
 
 ## 설정
 
@@ -66,7 +72,7 @@ python -m watcher watch --interval 300  # 주기 순찰 (기본 300초, 최소 5
 ## 테스트
 
 ```bash
-python -m unittest discover -s tests   # 43개 — 외부 AI 교차 게이트의 회귀 고정
+python -m unittest discover -s tests   # 49개 — 외부 AI 교차 게이트의 회귀 고정
 ```
 
 ## 알려진 한계 (정직하게)
