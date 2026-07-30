@@ -78,6 +78,13 @@ def validate_sites(sites):
         ):  # url과 같은 기준 — 같은 함수 안에서 같은 종류 필드를 다르게 다루지 않는다 (N-D)
             errors.append("%s: version_url은 http(s):// 로 시작하는 문자열이어야 함" % key)
             bad_keys.add(key)
+        for field in ("markers", "version_url", "confirm_checks", "timeout_sec"):
+            if field in site and site[field] is None:
+                # JSON null은 '미설정'이 아니다 — .get(field, 기본값)이 null을 그대로
+                # 반환해 기본값을 우회하고, timeout_sec/confirm_checks는 매 체크
+                # TypeError로 죽는다 (11차 P3-1). 네 필드 전부 같은 클래스로 거부
+                errors.append("%s: %s가 null — 미사용이면 키 자체를 뺄 것" % (key, field))
+                bad_keys.add(key)
         for field in ("confirm_checks", "timeout_sec"):
             value = site.get(field)
             if value is not None and (

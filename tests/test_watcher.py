@@ -157,6 +157,17 @@ class IsolationTest(unittest.TestCase):
             run_pass(sites, {}, alert=True, persist=False)
         self.assertEqual(observe.call_count, 2)
 
+    def test_validate_sites_rejects_explicit_null(self):
+        """11차 P3-1: JSON null은 .get(field, 기본값)의 기본값을 우회해
+        timeout_sec/confirm_checks에서 매 체크 TypeError로 죽는다 —
+        선택 필드 네 개 전부(클래스) 검증 단계에서 거부"""
+        for field in ("markers", "version_url", "confirm_checks", "timeout_sec"):
+            errors, _warnings, bad = checks_validate(
+                {"s": {"name": "S", "url": "http://a.b", field: None}}
+            )
+            self.assertTrue(errors, field)
+            self.assertIn("s", bad)
+
     def test_validate_sites_rejects_wrong_types(self):
         errors, _warnings, bad = checks_validate(
             {"s": {"name": "n", "url": "http://x", "markers": "데모샵", "confirm_checks": "2"}}

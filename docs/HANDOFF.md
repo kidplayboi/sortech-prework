@@ -1,11 +1,11 @@
 ﻿# HANDOFF — 세션 재개용 (컴팩 대비)
 
 > 재개 절차: **이 문서 → `MASTER-TRACKER.md` → `01-스펙.md`** 순서로 읽는다.
-> 재개 직후 검증: `python -m unittest discover -s tests`(39개, 동시성 확인은 반복 실행) + `python -m watcher status`
+> 재개 직후 검증: `python -m unittest discover -s tests`(40개, 동시성 확인은 반복 실행) + `python -m watcher status`
 
 ## 스냅샷 (2026-07-30)
 
-- **D1 완료**: 감지 L1~L3(생존/내용/배포반영) + 상태·알림 엔진(관측/통보 분리, 플랩 방지, 순단 사후 보고) + CLI(`status`·`once`·`watch`) + 테스트 39개 + README 완비
+- **D1 완료**: 감지 L1~L3(생존/내용/배포반영) + 상태·알림 엔진(관측/통보 분리, 플랩 방지, 순단 사후 보고) + CLI(`status`·`once`·`watch`) + 테스트 40개 + README 완비
 - **Codex 교차 게이트 8라운드 PASS** (P1 0 · P2 0) — 판정·수리·결산 전문 = `docs/audits/2026-07-29-codex-gate-D1.md`
 - 감시 대상 데모 사이트 라이브: https://kidplayboi.github.io/deploy-watcher-demo/ (v1.0.1, 별도 공개 레포)
 - 텔레그램 실채널 연결·발송 검증 완료 (자격 정보는 로컬 `.env` 전용 — 레포 미포함, 형식은 `.env.example`)

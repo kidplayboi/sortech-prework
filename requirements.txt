@@ -1,2 +1,2 @@
 requests>=2.31
-urllib3>=2.0  # HTTPResponse.read1 필요 — 실검증 2.7.0 (9차 P3-2)
+urllib3>=2.3  # HTTPResponse.read1(2.2 도입)+shutdown(2.3 도입) 필요 — 실검증 2.3.0·2.7.0 (11차 P2-1)

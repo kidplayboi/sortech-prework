@@ -17,11 +17,16 @@ import requests
 import urllib3.response
 from urllib3 import exceptions as u3exc
 
-if not hasattr(urllib3.response.HTTPResponse, "read1"):  # urllib3 < 2.0
-    # read1(수신 즉시 반환 읽기)이 없으면 트리클 워커 자가 종료(9차 N-A 수리)가
-    # 성립하지 않는다 — 조용히 열화하는 대신 시작을 거부한다 (설정 오류로 취급)
+if not hasattr(urllib3.response.HTTPResponse, "read1") or not hasattr(
+    urllib3.response.HTTPResponse, "shutdown"
+):
+    # read1(수신 즉시 반환)이 없으면 트리클 자가 종료가, shutdown()이 없으면
+    # Connection: close 변종의 워커 회수가 성립하지 않는다 — 조용히 열화하는 대신
+    # 시작을 거부한다. ⚠️도입 시점이 다르다: read1=2.2.0·shutdown=2.3.0 —
+    # read1만 검사하면 2.2.x가 절반 가드를 통과해 누수가 부활한다 (11차 P2-1:
+    # 그 창에서 자체 회귀 테스트 3개 FAIL 실측)
     raise ImportError(
-        "urllib3 2.x 필요 (HTTPResponse.read1) — requirements.txt 재설치 필요"
+        "urllib3 2.3+ 필요 (HTTPResponse.read1·shutdown) — requirements.txt 재설치 필요"
     )
 
 UA = "deploy-watcher/0.1 (+https://github.com/kidplayboi/sortech-prework)"
@@ -144,7 +149,9 @@ def _force_close(resp):
     HTTPResponse.shutdown() — Connection: close 응답은 소켓 소유권이 응답으로
     넘어가 _connection.sock이 None이 되므로 내부 속성 직접 접근은 keep-alive
     변종만 깨운다 (10차 P1-1 실측). urllib3는 정확히 그 이유로 소유권 이전 전에
-    shutdown 참조를 저장해 둔다. 구버전(2.0.x) shutdown 미탑재 대비 폴백 유지.
+    shutdown 참조를 저장해 둔다. shutdown 미탑재 버전(2.2.x 이하)은 임포트
+    가드가 시작을 거부하므로(11차 P2-1) 아래 sock 폴백은 이중 방어일 뿐이며
+    keep-alive 변종만 커버한다.
     예외는 전부 삼키고 close는 finally로 보장한다 (10차 P2-1 — TLS-in-TLS의
     SSLTransport는 shutdown API 자체가 없어 AttributeError/ValueError 경로 존재.
     그 환경의 프레이밍 드리블 회수는 잔존 한계 — README '알려진 한계').
@@ -153,8 +160,8 @@ def _force_close(resp):
     try:
         raw.shutdown()
     except Exception:
-        # shutdown 미탑재(구버전)·_sock_shutdown 없음(SSLTransport)·이미 닫힘 —
-        # keep-alive 한정이지만 _connection.sock 직접 shutdown으로 폴백
+        # _sock_shutdown 없음(SSLTransport의 ValueError)·이미 닫힘 등 —
+        # keep-alive 한정 sock 직접 shutdown으로 폴백 (이중 방어)
         try:
             raw._connection.sock.shutdown(socket.SHUT_RDWR)
         except Exception:
