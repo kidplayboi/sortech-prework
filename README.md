@@ -61,7 +61,9 @@ python -m watcher deploy my-site --expect "여름세일"         # 서버를 못
 }
 ```
 
-`markers` = 페이지에 반드시 있어야 할 텍스트. `version_url` = 배포 시 갱신하는 버전 파일(선택 — 없으면 L3 생략). `confirm_checks`(선택, 기본 1) = N회 연속 같은 관측일 때만 상태 확정(순단 플랩 방지). `render`(선택, 기본 false) = L4 렌더링 검증 — 무거워서 opt-in이며 Playwright 필요(`pip install playwright && python -m playwright install chromium`), `watch`에서는 `--render-every N`패스마다 1회(기본 5).
+`markers` = 페이지에 반드시 있어야 할 텍스트. `version_url` = 배포 시 갱신하는 버전 파일(선택 — 없으면 L3 생략). `confirm_checks`(선택, 기본 1) = N회 연속 같은 관측일 때만 상태 확정(순단 플랩 방지 — 단 간헐 층(L4/L5)은 실관측 1회 + 승계로 확정된다). `render`(선택, 기본 false) = L4 렌더링 검증 — 무거워서 opt-in이며 Playwright 필요(`pip install playwright && python -m playwright install chromium`), `watch`에서는 `--render-every N`패스마다 1회(기본 5).
+
+간헐 층의 대가(정직하게): `--render-every N`이면 L4를 안 돈 패스는 **직전 결과를 그대로 들고 간다**(모르는 것을 정상으로 치지 않기 위해). 그래서 L4 장애가 실제로 복구된 경우 🟢 통보가 최대 N주기(기본 5×5분=25분) 늦을 수 있다. 거짓 복구 알림을 없애는 대신 받아들인 트레이드오프다.
 
 `security`(선택, 기본 false) = L5 보안 층 — 클로킹 비교 + Safe Browsing 조회(`GSB_API_KEY` 필요). `spam_keywords`(선택) = 기본 스팸 시그니처에 사이트별 문구 추가.
 
@@ -85,7 +87,7 @@ curl -s -A "Googlebot/2.1" http://127.0.0.1:8899     | grep 바카라   # 나옴
 ## 테스트
 
 ```bash
-python -m unittest discover -s tests   # 60개 — 외부 AI 교차 게이트의 회귀 고정
+python -m unittest discover -s tests   # 76개 — 외부 AI 교차 게이트의 회귀 고정
 ```
 
 ## 알려진 한계 (정직하게)

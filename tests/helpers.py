@@ -93,6 +93,48 @@ class _DemoHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+class _RotatingHandler(http.server.BaseHTTPRequestHandler):
+    """L5 클로킹 오탐/탐지 검증용 **실서버** (14차 P2-1).
+
+    - `/rotate2`, `/rotate3` = 정상 사이트인데 배너가 **순차 회전**한다(주기 2·3).
+      스팸 단어가 특정 회차에만 등장 → 요청 순서와 회전 위상이 맞물리면 "봇에게만
+      보인다"로 오판된다. 14차에서 8/8 오탐이 실측된 조건 그대로.
+    - `/cloak` = 진짜 클로킹(검색봇 UA에만 스팸) — 수리가 탐지력을 깎지 않았는지
+      확인하는 반대 방향 대조.
+
+    스텁이 아닌 실서버로 두는 이유: 스텁은 "재확인에서 스팸이 사라진다"는 *가정*을
+    고정할 뿐이어서 수리를 검증하지 못한다(오답 14호 vacuous 클래스).
+    """
+
+    protocol_version = "HTTP/1.0"
+    ROTATION = {}  # 경로별 요청 카운터 — 클래스 변수로 순차 위상을 만든다
+    SPAM = "바카라"
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        ua = (self.headers.get("User-Agent") or "").lower()
+        if path == "/cloak":
+            body = "데모샵 장바구니" + (" %s 카지노" % self.SPAM
+                                     if "googlebot" in ua else "")
+        else:
+            period = 3 if path == "/rotate3" else 2
+            index = self.ROTATION.get(path, 0)
+            self.ROTATION[path] = index + 1
+            # 회차 1(주기 2) / 회차 1(주기 3)에만 스팸 단어가 실린 배너가 뜬다
+            body = "데모샵 장바구니 배너%d" % (index % period)
+            if index % period == 1:
+                body += " %s 이벤트" % self.SPAM
+        data = body.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *_args):
+        pass
+
+
 class _ChunkDripHandler(http.server.BaseHTTPRequestHandler):
     """chunk-size 줄을 바이트 단위로 드리블 — readline()이 버퍼 락을 쥔 채 여러
     recv에 걸쳐 블록하는 9차 P1-1 재현. chunked는 HTTP/1.1에서만 해석되므로

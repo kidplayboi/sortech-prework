@@ -10,7 +10,10 @@ from unittest import mock
 
 import requests
 
-from helpers import _ChunkDripHandler, _DemoHandler
+try:  # discover -s tests (경로 삽입) 와 python -m unittest tests.test_net 양쪽 지원
+    from helpers import _ChunkDripHandler, _DemoHandler
+except ImportError:  # pragma: no cover - 실행 방식에 따른 분기 (14차 P3-3)
+    from .helpers import _ChunkDripHandler, _DemoHandler
 from watcher import checks
 
 

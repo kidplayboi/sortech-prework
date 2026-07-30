@@ -106,6 +106,9 @@ def _one_check(site, expect, expect_version):
     **"검증 불가"(unknown)는 미반영과 다르다** — 도구 미설치·키 미설정은 사이트
     상태가 아니므로 안정 판정을 막지 않고 결과 문구에만 부기한다. 이걸 pending으로
     묶으면 건강한 배포가 10분 뒤 "시간 초과 실패"로 오보된다 (13차 P2-3).
+    단 **blocking unknown**(사이트 응답 자체를 온전히 못 본 경우 — L2 본문 부분
+    수신 등)은 pending이다: 내용 검증을 못 한 상태에 "안정"을 선언할 수는 없다
+    (14차 P2-3 — 보조 unknown까지 일괄 관용하던 것의 교정).
     """
     probe = dict(site)
     probe.pop("version_url", None)
@@ -114,6 +117,10 @@ def _one_check(site, expect, expect_version):
     hard = [r for r in results if not r["ok"] and not r.get("warn")]
     if hard:
         return VERDICT_FAIL, "%s %s" % (hard[0]["layer"], hard[0]["detail"]), unknowns
+    blocking = [r for r in results if r.get("unknown") and r.get("blocking")]
+    if blocking:
+        return (VERDICT_PENDING,
+                "%s %s" % (blocking[0]["layer"], blocking[0]["detail"]), unknowns)
     warns = [r for r in results
              if not r["ok"] and r.get("warn") and not r.get("unknown")]
     if warns:
@@ -127,7 +134,10 @@ def _one_check(site, expect, expect_version):
     elif site.get("version_url"):
         verdict, detail = _match_goal(site)
     else:
-        verdict, detail = VERDICT_OK, " · ".join("%s ✓" % r["layer"] for r in results)
+        # 검증하지 못한 층에 ✓를 붙이지 않는다 — '?'로 구분 (14차 P2-3)
+        verdict = VERDICT_OK
+        detail = " · ".join("%s %s" % (r["layer"], "?" if r.get("unknown") else "✓")
+                            for r in results)
     return verdict, detail, unknowns
 
 

@@ -59,6 +59,11 @@ def check_site(site, do_render=True):
     if deferred:
         l2 = {"layer": "L2", "ok": True,
               "detail": "원문에 마커 없음 — 렌더 후 검증(L4)에 위임"}
+    else:
+        # 위임하지 않는 경로에서는 내부 신호를 결과에 남기지 않는다 (14차 P3-6)
+        l2.pop("marker_missing", None)
+        l2.pop("truncated_body", None)
+    l2_index = len(results)  # 위임 L2의 슬롯 — results[-1]로 잡으면 L3를 지운다 (14차 P2-2)
     results.append(l2)
     if not l2["ok"]:
         return results
@@ -76,8 +81,9 @@ def check_site(site, do_render=True):
             l4 = render.check_render(site)
             if deferred and l4.get("unknown"):
                 # 위임했는데 심판이 없다 — 조용한 검증 공백을 만들지 않고
-                # 두 사실을 합쳐 정직하게 장애로 보고한다
-                results[-1] = {
+                # 두 사실을 합쳐 정직하게 장애로 보고한다. 교체는 저장해 둔
+                # L2 슬롯에만 (L3가 뒤에 있으면 results[-1]은 L3다 — 14차 P2-2)
+                results[l2_index] = {
                     "layer": "L2", "ok": False,
                     "detail": "원문에 핵심 내용 없음 + 렌더 검증 불가(%s)" % l4["detail"],
                 }
@@ -285,6 +291,10 @@ def _l2_content(site, body, headers, truncated=False):
                 "ok": False,
                 "warn": True,
                 "unknown": True,  # 크기 상한 때문에 못 본 것 = 사이트 문제 아님
+                # blocking = 사이트 응답 자체를 온전히 못 봤다 → 배포 "안정" 선언 불가
+                # (14차 P2-3: 도구 부재 같은 보조 unknown과 같은 등급으로 관용하면
+                #  마커 검증도 못 한 상태에 🟢 + "L2 ✓"를 붙이는 오보가 된다)
+                "blocking": True,
                 "marker_missing": True,
                 "truncated_body": True,
                 "detail": "본문 부분 수신(%d바이트 ≥ 상한 %d) — 내용 검증 불가"

@@ -11,7 +11,10 @@ import threading
 import unittest
 from unittest import mock
 
-from helpers import _DemoHandler
+try:  # discover -s tests (경로 삽입) 와 python -m unittest tests.test_layers 양쪽 지원
+    from helpers import _DemoHandler, _RotatingHandler
+except ImportError:  # pragma: no cover - 실행 방식에 따른 분기 (14차 P3-3)
+    from .helpers import _DemoHandler, _RotatingHandler
 from watcher import board, checks, deploy, notify, security
 from watcher.cli import run_pass
 
@@ -63,8 +66,10 @@ class SecurityLayerTest(unittest.TestCase):
         seq = iter([
             ("정상 데모샵", ""),                      # user 1회차
             ("정상 데모샵 바카라 배너", ""),          # bot 1회차 — 히트
-            ("정상 데모샵", ""),                      # user 재확인
-            ("정상 데모샵 다른배너", ""),             # bot 재확인 — 스팸 없음
+            ("정상 데모샵 다른배너", ""),             # bot 재표본(순서 반전)
+            ("정상 데모샵", ""),                      # user 재표본
+            ("정상 데모샵 또다른배너", ""),           # bot 3표본
+            ("정상 데모샵", ""),                      # user 3표본
         ])
         with mock.patch.object(security, "_fetch_view", side_effect=lambda *a, **k: next(seq)):
             result = security.check_cloaking(
@@ -77,7 +82,7 @@ class SecurityLayerTest(unittest.TestCase):
         result = self._cloak("정상 데모샵", "정상 데모샵 바카라")
         self.assertFalse(result["ok"])
         self.assertNotIn("warn", result)
-        self.assertIn("2회 연속", result["detail"])
+        self.assertIn("교차 표본 전부 재현", result["detail"])
 
     def test_non_200_view_is_unknown_not_match(self):
         """13차 P3-2: 비200·부분 수신을 '일치'로 통과시키면 거짓 음성"""
@@ -123,6 +128,47 @@ class SecurityLayerTest(unittest.TestCase):
                                              b"body", {}, False)):
             results = checks.check_site({"url": "http://a.b"}, do_render=False)
         self.assertFalse(any("L5" in r["layer"] for r in results))
+
+
+class CloakingRealServerTest(unittest.TestCase):
+    """14차 P2-1 — 스텁이 아닌 **실서버**로 오탐/탐지를 동시에 고정한다.
+    스텁은 "재확인에서 스팸이 사라진다"는 가정만 고정해 수리를 검증하지 못했다."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _RotatingHandler)
+        cls.server.daemon_threads = True
+        cls.port = cls.server.server_address[1]
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def setUp(self):
+        _RotatingHandler.ROTATION.clear()  # 위상을 매 테스트 초기화
+
+    def _site(self, path):
+        return {"url": "http://127.0.0.1:%d%s" % (self.port, path),
+                "markers": ["데모샵"], "timeout_sec": 10}
+
+    def test_sequential_rotation_period2_is_not_flagged(self):
+        """순차 회전(주기 2) — 14차에 8/8 오탐이 나온 조건. 여러 회 반복해도 통과"""
+        for _ in range(4):
+            result = security.check_cloaking(self._site("/rotate2"))
+            self.assertTrue(result["ok"], result["detail"])
+
+    def test_sequential_rotation_period3_is_not_flagged(self):
+        for _ in range(4):
+            result = security.check_cloaking(self._site("/rotate3"))
+            self.assertTrue(result["ok"], result["detail"])
+
+    def test_real_cloaking_still_detected(self):
+        """반대 방향 — 진짜 클로킹은 여전히 하드 FAIL이어야 한다(탐지력 보존)"""
+        result = security.check_cloaking(self._site("/cloak"))
+        self.assertFalse(result["ok"])
+        self.assertNotIn("warn", result)
+        self.assertIn("바카라", result["detail"])
 
 
 class IntermittentLayerTest(unittest.TestCase):

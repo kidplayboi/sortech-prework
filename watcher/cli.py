@@ -27,12 +27,18 @@ def _carry_layers(results, carried):
     (모르는 것을 정상으로 치지 않는다). 승계된 항목은 문구에 그 사실을 표시한다.
     """
     seen = {r["layer"] for r in results}
-    for layer, prev in carried.items():
-        if layer not in seen:
-            merged = dict(prev)
-            if "(이전 관측)" not in merged["detail"]:
-                merged["detail"] = "%s (이전 관측)" % merged["detail"]
-            results.append(merged)
+    # 앞 층이 확정 장애면 뒤 층은 애초에 실행되지 않는다 — 그 자리에 낡은
+    # "L4 렌더 정상 (이전 관측)"을 끼워 넣으면 다운된 사이트 옆에 정상 표기가
+    # 나란히 붙는다 (14차 P3-7). 주입만 건너뛰고, 이번에 실제로 돌린 층의
+    # 기록은 그대로 남긴다 — 기록까지 건너뛰면 승계 자체가 사라져 13차 P1-1이
+    # 되살아난다 (이 수리를 넣자마자 회귀 테스트가 잡아낸 지점)
+    if not any(not r["ok"] and not r.get("warn") for r in results):
+        for layer, prev in carried.items():
+            if layer not in seen:
+                merged = dict(prev)
+                if "(이전 관측)" not in merged["detail"]:
+                    merged["detail"] = "%s (이전 관측)" % merged["detail"]
+                results.append(merged)
     for r in results:
         if r["layer"].startswith(CARRY_LAYER_PREFIXES) and "(이전 관측)" not in r["detail"]:
             carried[r["layer"]] = r
