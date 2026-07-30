@@ -287,6 +287,22 @@ class _DemoHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
+        if self.path.startswith("/badgzip"):
+            # gzip 선언 후 깨진 바이트 — urllib3 DecodeError 경로 (9차 P2-1)
+            data = b"\x1f\x8b\x08\x00 broken not gzip"
+            self.send_response(200)
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if self.path.startswith("/cut"):
+            # Content-Length 선언 후 조기 절단 — ProtocolError(IncompleteRead) 경로 (9차 P2-1)
+            self.send_response(200)
+            self.send_header("Content-Length", "10000")
+            self.end_headers()
+            self.wfile.write(b"partial")
+            return
         if self.path.startswith("/drip"):
             # 바이트 단위 병적 트리클 (9차 N-A). 400회×0.05초=20초 안전 상한 —
             # 단언 상한(3초)보다 훨씬 길어 옛 코드의 누수를 가리지 못한다
@@ -316,6 +332,35 @@ class _DemoHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+class _ChunkDripHandler(http.server.BaseHTTPRequestHandler):
+    """chunk-size 줄을 바이트 단위로 드리블 — readline()이 버퍼 락을 쥔 채 여러
+    recv에 걸쳐 블록하는 9차 P1-1 재현. chunked는 HTTP/1.1에서만 해석되므로
+    기존 1.0 핸들러와 분리한다 (keep-alive 파급 차단). 100회×~0.15초 ≈ 안전 상한 15초."""
+
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        try:
+            # chunk-size 줄을 끝내지 않고 chunk-extension 바이트를 계속 드리블 —
+            # readline()이 한 줄을 완성하지 못한 채 버퍼 락을 계속 쥔다 (진짜 P1-1
+            # 조건). ⚠️줄이 짧게 끝나는 드리블은 readline이 줄 사이마다 락을 놓아
+            # close-only도 회수돼 vacuous 테스트가 된다 — 음성대조로 적발된 함정
+            self.wfile.write(b"1;")
+            self.wfile.flush()
+            for _ in range(400):  # 안전 상한 ~20초
+                self.wfile.write(b"a")
+                self.wfile.flush()
+                time.sleep(0.05)
+        except OSError:
+            pass
+
+    def log_message(self, *_args):
+        pass
+
+
 class BoundedGetIntegrationTest(unittest.TestCase):
     """G8: truncated 분기를 직접 호출로만 검증하지 않고 실제 HTTP 경로로 검증"""
 
@@ -325,10 +370,17 @@ class BoundedGetIntegrationTest(unittest.TestCase):
         cls.server.daemon_threads = True  # 진행 중 핸들러가 shutdown을 붙잡지 않게
         cls.port = cls.server.server_address[1]
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.chunk_server = socketserver.ThreadingTCPServer(
+            ("127.0.0.1", 0), _ChunkDripHandler
+        )
+        cls.chunk_server.daemon_threads = True
+        cls.chunk_port = cls.chunk_server.server_address[1]
+        threading.Thread(target=cls.chunk_server.serve_forever, daemon=True).start()
 
     @classmethod
     def tearDownClass(cls):
         cls.server.shutdown()
+        cls.chunk_server.shutdown()
 
     @staticmethod
     def _watcher_threads():
@@ -363,6 +415,37 @@ class BoundedGetIntegrationTest(unittest.TestCase):
         while self._watcher_threads() and time.monotonic() < deadline:
             time.sleep(0.05)
         self.assertEqual(self._watcher_threads(), [])
+
+    def test_chunked_framing_dribble_worker_reclaimed(self):
+        """9차 P1-1: chunk-size 줄 드리블은 readline이 버퍼 락을 쥔 채 블록해
+        read1 데드라인 검사가 돌지 않는다 — shutdown 위임이 소켓을 깨서 회수한다
+        (close-only였던 옛 정리 경로는 같은 락에 막혀 워커·정리 스레드가 함께
+        10초+ 잔존 — 이 폴링 상한에서 RED)."""
+        started = time.monotonic()
+        with self.assertRaises(requests.RequestException):
+            checks._bounded_get("http://127.0.0.1:%d/chunkdrip" % self.chunk_port, 1)
+        self.assertLess(time.monotonic() - started, 4)
+        deadline = time.monotonic() + 4
+        while self._watcher_threads() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(self._watcher_threads(), [])
+
+    def test_broken_gzip_translates_to_requests_exception(self):
+        """9차 P2-1: urllib3 DecodeError가 requests 계열로 번역돼 L1 '요청 실패'로
+        잡혀야 한다 — 누출되면 사이트 장애가 '체크 자체 실패'(워처 고장)로 오귀속"""
+        l1, _body, _headers, _tr = checks._l1_alive(
+            {"url": "http://127.0.0.1:%d/badgzip" % self.port, "timeout_sec": 5}
+        )
+        self.assertFalse(l1["ok"])
+        self.assertIn("요청 실패", l1["detail"])
+
+    def test_truncated_content_length_translates_to_requests_exception(self):
+        """9차 P2-1: CL 선언 후 절단(ProtocolError)도 같은 번역 경로"""
+        l1, _body, _headers, _tr = checks._l1_alive(
+            {"url": "http://127.0.0.1:%d/cut" % self.port, "timeout_sec": 5}
+        )
+        self.assertFalse(l1["ok"])
+        self.assertIn("요청 실패", l1["detail"])
 
     def test_gzip_body_is_decoded(self):
         """9차 read1 전환이 압축 해제(decode_content)를 잃지 않는지 고정"""

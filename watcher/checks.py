@@ -8,12 +8,14 @@ L3 배포반영 — 원본(캐시 우회)과 사용자 화면(캐시 경유)의 
 모든 요청은 총 시한·크기 상한이 있다 — 찔끔찔끔 응답하는 서버 하나가
 순차 루프 전체를 점유하는 것을 막는다 (Codex 게이트 P2-7).
 """
+import socket
 import threading
 import time
 import urllib.parse
 
 import requests
 import urllib3.response
+from urllib3 import exceptions as u3exc
 
 if not hasattr(urllib3.response.HTTPResponse, "read1"):  # urllib3 < 2.0
     # read1(수신 즉시 반환 읽기)이 없으면 트리클 워커 자가 종료(9차 N-A 수리)가
@@ -25,7 +27,7 @@ if not hasattr(urllib3.response.HTTPResponse, "read1"):  # urllib3 < 2.0
 UA = "deploy-watcher/0.1 (+https://github.com/kidplayboi/sortech-prework)"
 MAX_BODY_BYTES = 2_000_000
 VERSION_MAX_LEN = 64
-READ1_CHUNK = 65536
+READ1_CHUNK = 65536  # size cap 오버슈트 상한 = 이 값 — 본문이 상한+64KB까지 커질 수 있다 (9차 P3-3)
 
 
 def check_site(site):
@@ -51,11 +53,12 @@ def _bounded_get(url, timeout_sec):
     """총 시한·크기 상한이 있는 GET. 반환: (status_code, body_bytes, headers, truncated)
 
     - 총 시한: 데몬 워커 스레드 + join(timeout)으로 강제한다. 시한 초과 시 호출자는
-      requests.Timeout을 즉시 받는다. 워커 회수: 읽기가 read1(한 번의 수신이 도착하는
-      즉시 반환)이라 데이터가 흐르는 한 매 수신마다 데드라인을 확인하고 자가 종료한다
-      — 바이트 단위 트리클도 시한 직후 회수된다 (9차 게이트 N-A 수리, 7·8차의
-      "회수 안 될 수 있음" 한계를 대체). 무응답 구간은 read timeout이 끊는다.
-      남는 한계는 응답 헤더 단계에서 정체하는 서버(K-B)뿐 — README '알려진 한계'.
+      requests.Timeout을 즉시 받는다. 워커 회수 2중 구조 — ① 읽기가 read1(수신 즉시
+      반환)이라 데이터가 산출되는 한 매 반환마다 데드라인 자가 종료 ② 프레이밍/압축
+      내부 읽기에 갇혀 ①이 안 도는 구간(chunk-size 줄 드리블 등)은 시한 초과 시
+      위임 스레드가 소켓을 shutdown으로 깨서 회수한다 (9~10차 게이트 — close()만으로는
+      readline이 쥔 버퍼 락에 막혀 무기한 블록됨이 계측됐다). 무응답 구간은 read
+      timeout이 끊는다. 남는 한계 = 응답 헤더 단계 정체(K-B) — README '알려진 한계'.
     - truncated=True는 '크기 상한으로 잘린 부분 본문'을 뜻한다 — 이 신호 없이
       부분 본문을 정상 응답처럼 반환하면 멀쩡한 페이지가 오탐된다 (2차 N1 교정).
     """
@@ -73,11 +76,25 @@ def _bounded_get(url, timeout_sec):
             with resp:  # 예외 경로에서도 커넥션 반환 (N11)
                 while True:
                     if time.monotonic() > deadline:
-                        # read1은 수신이 올 때마다 반환하므로 이 검사가 매 수신마다
-                        # 실행된다 — iter_content(1024)는 1024바이트가 모일 때까지
-                        # 블록해 바이트 트리클에서 워커가 수십 초 생존했다 (N-A 수리)
+                        # identity 응답에선 read1이 수신마다 반환해 이 검사가 돌지만,
+                        # 압축·chunked 프레이밍은 urllib3 내부 루프가 산출 0바이트
+                        # 수신을 흡수해 간격이 늘어질 수 있다 — 그 구간의 회수는
+                        # 시한 초과 시 소켓 shutdown 위임이 담당한다 (9차 P1-1·P3-1)
                         raise requests.Timeout("총 시한 초과(워커 자가 종료)")
-                    chunk = resp.raw.read1(READ1_CHUNK, decode_content=True)
+                    try:
+                        chunk = resp.raw.read1(READ1_CHUNK, decode_content=True)
+                    # raw 직접 읽기는 requests의 예외 번역(models.py iter_content)을
+                    # 우회한다 — 같은 번역표를 미러해 계층 핸들러(RequestException
+                    # 그물)가 사이트 장애를 "체크 자체 실패"로 오귀속하지 않게 한다
+                    # (9차 P2-1: DecodeError/ProtocolError/ReadTimeoutError 누출 실측)
+                    except u3exc.ProtocolError as exc:
+                        raise requests.exceptions.ChunkedEncodingError(exc)
+                    except u3exc.DecodeError as exc:
+                        raise requests.exceptions.ContentDecodingError(exc)
+                    except u3exc.ReadTimeoutError as exc:
+                        raise requests.exceptions.ConnectionError(exc)
+                    except u3exc.SSLError as exc:
+                        raise requests.exceptions.SSLError(exc)
                     if not chunk:  # b"" = EOF (read1은 압축 해제 결과가 비면 내부 재시도)
                         break
                     chunks.append(chunk)
@@ -98,18 +115,42 @@ def _bounded_get(url, timeout_sec):
     if worker.is_alive():
         resp = holder.get("resp")
         if resp is not None:
-            # close()는 워커의 in-flight read가 끝나기를 기다리며 수 초 블록할 수
-            # 있음이 계측됐다 (5차 게이트 K-A — 메인에서 동기 호출하면 시한이 다시
-            # 깨진다). 데몬 스레드에 위임해 메인은 즉시 복귀한다. 워커 자체는
-            # 수신 중이면 read1 데드라인, 무응답이면 read timeout으로 자가 종료한다.
-            threading.Thread(target=resp.close, daemon=True, name="watcher-close").start()
+            # 정리 위임 (데몬 스레드 — 메인은 즉시 복귀, 5차 K-A). close()만으로는
+            # 워커의 readline이 쥔 버퍼 락에 막혀 무기한 블록될 수 있음이 계측됐다
+            # (9차 P1-1) — _force_close가 소켓 shutdown을 선행해 락 없이 recv를 깬다.
+            threading.Thread(
+                target=_force_close, args=(resp,), daemon=True, name="watcher-close"
+            ).start()
         # 알려진 한계 (K-B): 응답 헤더 단계에서 정체하는 병적 서버는 requests.get()이
         # 반환하지 않아 holder가 비고, 닫을 핸들 자체가 없다. 워커는 데몬이라
-        # 프로세스 종료는 막지 않지만, 헤더가 계속 찔끔 오는 한 회수는 늦어질 수 있다.
+        # 프로세스 종료는 막지 않지만, 서버가 계속 흘리는 한 회수는 사실상 안 될 수
+        # 있다 — 상시 순찰에서 이런 서버를 만날 때마다 스레드·소켓이 누적된다.
         raise requests.Timeout("총 시한 %d초 초과" % timeout_sec)
     if "exc" in result:
         raise result["exc"]
     return result["value"]
+
+
+def _force_close(resp):
+    """시한 초과 정리 (위임 스레드 전용). 소켓 shutdown → close 순서.
+
+    close()는 워커의 readline이 쥔 BufferedReader 락을 기다리지만, shutdown은
+    락 없이 블록된 recv를 즉시 깬다 (9차 P1-1 — chunk-size 줄 드리블에서
+    close-only는 워커·정리 스레드가 함께 무기한 잔존함이 계측됐다).
+    _connection은 urllib3 내부 속성이라 방어적으로 접근한다(없으면 close만,
+    실검증 urllib3 2.7.0). 예외는 삼킨다 — 이미 닫힌/깨진 소켓의 정리 실패에
+    더 할 수 있는 일이 없고, 데몬 스레드의 스택 덤프만 남긴다.
+    """
+    sock = getattr(getattr(getattr(resp, "raw", None), "_connection", None), "sock", None)
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+    try:
+        resp.close()
+    except Exception:
+        pass
 
 
 def _decode(body, headers):
@@ -175,8 +216,8 @@ def _l2_content(site, body, headers, truncated=False):
                 "layer": "L2",
                 "ok": False,
                 "warn": True,
-                "detail": "본문 부분 수신(%d바이트, 크기 상한 초과) — 내용 검증 불가"
-                % len(body),
+                "detail": "본문 부분 수신(%d바이트 ≥ 상한 %d) — 내용 검증 불가"
+                % (len(body), MAX_BODY_BYTES),
             }
         return {
             "layer": "L2",
