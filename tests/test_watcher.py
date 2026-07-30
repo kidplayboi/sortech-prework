@@ -158,15 +158,28 @@ class IsolationTest(unittest.TestCase):
         self.assertEqual(observe.call_count, 2)
 
     def test_validate_sites_rejects_explicit_null(self):
-        """11차 P3-1: JSON null은 .get(field, 기본값)의 기본값을 우회해
-        timeout_sec/confirm_checks에서 매 체크 TypeError로 죽는다 —
-        선택 필드 네 개 전부(클래스) 검증 단계에서 거부"""
-        for field in ("markers", "version_url", "confirm_checks", "timeout_sec"):
+        """11차 P3-1 + 12차 P3-1: null 등급은 런타임 영향 기준 —
+        크래시 필드(confirm_checks/timeout_sec)만 error로 제외하고,
+        무해 필드(markers/version_url)는 경고 후 감시 계속 (가용성 우선 H-G:
+        단일 사이트 설정에서 감시 전면 중단을 만들지 않는다)"""
+        for field in ("confirm_checks", "timeout_sec"):
             errors, _warnings, bad = checks_validate(
                 {"s": {"name": "S", "url": "http://a.b", field: None}}
             )
             self.assertTrue(errors, field)
             self.assertIn("s", bad)
+        for field in ("markers", "version_url"):
+            errors, warnings, bad = checks_validate(
+                {"s": {"name": "S", "url": "http://a.b", field: None}}
+            )
+            self.assertEqual(errors, [], field)
+            self.assertNotIn("s", bad)
+            self.assertTrue(any("null" in w for w in warnings), field)
+        # markers null에 경고 두 개(자기모순 출력)를 내지 않는다
+        _errors, warnings, _bad = checks_validate(
+            {"s": {"name": "S", "url": "http://a.b", "markers": None}}
+        )
+        self.assertEqual(len([w for w in warnings if "markers" in w]), 1)
 
     def test_validate_sites_rejects_wrong_types(self):
         errors, _warnings, bad = checks_validate(

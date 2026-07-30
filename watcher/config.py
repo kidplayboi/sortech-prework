@@ -78,14 +78,20 @@ def validate_sites(sites):
         ):  # url과 같은 기준 — 같은 함수 안에서 같은 종류 필드를 다르게 다루지 않는다 (N-D)
             errors.append("%s: version_url은 http(s):// 로 시작하는 문자열이어야 함" % key)
             bad_keys.add(key)
-        for field in ("markers", "version_url", "confirm_checks", "timeout_sec"):
+        # JSON null 처리 — .get(field, 기본값)이 null을 그대로 반환해 기본값을
+        # 우회한다 (11차 P3-1). 등급은 런타임 영향 기준으로 나눈다 (12차 P3-1):
+        # confirm_checks/timeout_sec null = 매 체크 TypeError → error(제외),
+        # markers/version_url null = L2 비활성/L3 생략과 동일해 무해 → 경고만
+        # (가용성 우선 H-G — 단일 사이트 설정에서 감시 전면 중단을 만들지 않는다)
+        if "version_url" in site and version_url is None:
+            warnings.append(
+                "%s: version_url이 null — 미설정으로 처리(L3 생략). 키를 빼는 걸 권장" % key
+            )
+        for field in ("confirm_checks", "timeout_sec"):
             if field in site and site[field] is None:
-                # JSON null은 '미설정'이 아니다 — .get(field, 기본값)이 null을 그대로
-                # 반환해 기본값을 우회하고, timeout_sec/confirm_checks는 매 체크
-                # TypeError로 죽는다 (11차 P3-1). 네 필드 전부 같은 클래스로 거부
                 errors.append("%s: %s가 null — 미사용이면 키 자체를 뺄 것" % (key, field))
                 bad_keys.add(key)
-        for field in ("confirm_checks", "timeout_sec"):
+                continue
             value = site.get(field)
             if value is not None and (
                 not isinstance(value, int) or isinstance(value, bool) or value < 1
@@ -93,5 +99,11 @@ def validate_sites(sites):
                 errors.append("%s: %s는 1 이상 정수여야 함 (현재 %r)" % (key, field, value))
                 bad_keys.add(key)
         if not markers:
-            warnings.append("%s: markers 미설정 — L2 내용 검증 비활성" % key)
+            if "markers" in site and markers is None:
+                # 같은 값에 경고 두 개를 내지 않는다 (12차 P3-1 자기모순 출력)
+                warnings.append(
+                    "%s: markers가 null — 미설정으로 처리(L2 비활성). 키를 빼는 걸 권장" % key
+                )
+            else:
+                warnings.append("%s: markers 미설정 — L2 내용 검증 비활성" % key)
     return errors, warnings, bad_keys
