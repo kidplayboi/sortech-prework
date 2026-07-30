@@ -8,6 +8,7 @@
     ],
     "version_url": "https://kidplayboi.github.io/deploy-watcher-demo/version.txt",
     "timeout_sec": 10,
-    "render": true
+    "render": true,
+    "security": true
   }
 }

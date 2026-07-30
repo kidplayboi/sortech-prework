@@ -60,10 +60,15 @@ def check_site(site, do_render=True):
 
             results.append(render.check_render(site))
 
+    if site.get("security") is True:
+        from . import security  # 지연 임포트 — 층별 모듈 독립성 유지
+
+        results.extend(security.check_security(site))
+
     return results
 
 
-def _bounded_get(url, timeout_sec):
+def _bounded_get(url, timeout_sec, ua=UA, referer=None):
     """총 시한·크기 상한이 있는 GET. 반환: (status_code, body_bytes, headers, truncated)
 
     - 총 시한: 데몬 워커 스레드 + join(timeout)으로 강제한다. 시한 초과 시 호출자는
@@ -81,6 +86,9 @@ def _bounded_get(url, timeout_sec):
     holder, result = {}, {}
 
     deadline = time.monotonic() + timeout_sec
+    headers = {"User-Agent": ua}
+    if referer:  # L5 클로킹 검사용 — 검색 유입인 척하는 분기를 재현한다
+        headers["Referer"] = referer
 
     def _fetch():
         try:
@@ -88,7 +96,7 @@ def _bounded_get(url, timeout_sec):
             # read timeout 승자에 따라 두 문구(Timeout vs ConnectionError)로 갈리는
             # 비결정 제거 (10차 P3-2). 무응답 워커 자가 종료는 1초 늦어질 뿐 유지
             resp = requests.get(
-                url, timeout=(5, timeout_sec + 1), stream=True, headers={"User-Agent": UA}
+                url, timeout=(5, timeout_sec + 1), stream=True, headers=headers
             )
             holder["resp"] = resp  # 시한 초과 시 정리 위임 스레드가 close()할 수 있게 공유
             chunks, size, truncated = [], 0, False

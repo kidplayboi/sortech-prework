@@ -19,7 +19,7 @@ from unittest import mock
 
 import requests
 
-from watcher import board, checks, deploy, notify, state as state_mod
+from watcher import board, checks, deploy, notify, security, state as state_mod
 from watcher.cli import run_pass
 from watcher.config import validate_sites as checks_validate
 
@@ -536,6 +536,81 @@ class BoundedGetIntegrationTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(truncated)
         self.assertGreaterEqual(len(body), 1000)
+
+
+class SecurityLayerTest(unittest.TestCase):
+    """L5 보안 축 (D2 슬라이스 ④) — 클로킹 판정·GSB 평판"""
+
+    def _cloak(self, user_text, bot_text, markers=("데모샵",)):
+        def fake(url, timeout, ua=checks.UA, referer=None):
+            return bot_text if ua == security.BOT_UA else user_text
+
+        site = {"url": "http://a.b", "markers": list(markers), "timeout_sec": 5}
+        with mock.patch.object(security, "_fetch_text", side_effect=fake):
+            return security.check_cloaking(site)
+
+    def test_bot_only_spam_is_fail(self):
+        """검색봇에만 도박 문구 = 클로킹 의심 (한국 실측 수법)"""
+        result = self._cloak("데모샵 정상 페이지", "데모샵 바카라 카지노 먹튀검증")
+        self.assertFalse(result["ok"])
+        self.assertNotIn("warn", result)
+        self.assertIn("바카라", result["detail"])
+
+    def test_spam_on_both_sides_is_not_cloaking(self):
+        """양쪽에 다 있으면 사이트 성격 — 클로킹 아님(오탐 방지)"""
+        result = self._cloak("카지노 리뷰 사이트 데모샵", "카지노 리뷰 사이트 데모샵")
+        self.assertTrue(result["ok"], result["detail"])
+
+    def test_marker_vanishing_for_bot_is_warn_not_fail(self):
+        """봇 차단 WAF일 수도 있어 단정하지 않는다"""
+        result = self._cloak("데모샵 정상", "Access Denied")
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["warn"])
+        self.assertIn("사라짐", result["detail"])
+
+    def test_custom_spam_keyword_from_site_config(self):
+        def fake(url, timeout, ua=checks.UA, referer=None):
+            return "정상" if ua != security.BOT_UA else "정상 특정광고문구"
+
+        site = {"url": "http://a.b", "markers": [], "spam_keywords": ["특정광고문구"]}
+        with mock.patch.object(security, "_fetch_text", side_effect=fake):
+            result = security.check_cloaking(site)
+        self.assertFalse(result["ok"])
+        self.assertIn("특정광고문구", result["detail"])
+
+    def test_missing_gsb_key_warns_not_silent_pass(self):
+        """noop이 실패를 성공처럼 보고하는 클래스 차단"""
+        with mock.patch.object(security, "_gsb_key", return_value=""):
+            result = security.check_reputation({"url": "http://a.b"})
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["warn"])
+        self.assertIn("GSB_API_KEY", result["detail"])
+
+    def test_gsb_match_is_hard_fail(self):
+        resp = mock.Mock(status_code=200)
+        resp.json.return_value = {"matches": [{"threatType": "MALWARE"}]}
+        with mock.patch.object(security, "_gsb_key", return_value="k"), \
+             mock.patch.object(security.requests, "post", return_value=resp):
+            result = security.check_reputation({"url": "http://a.b"})
+        self.assertFalse(result["ok"])
+        self.assertNotIn("warn", result)
+        self.assertIn("MALWARE", result["detail"])
+
+    def test_gsb_http_error_does_not_leak_body(self):
+        """응답 본문에 키가 반사될 수 있어 상태코드만 노출"""
+        resp = mock.Mock(status_code=403, text="key=SECRET123 invalid")
+        with mock.patch.object(security, "_gsb_key", return_value="SECRET123"), \
+             mock.patch.object(security.requests, "post", return_value=resp):
+            result = security.check_reputation({"url": "http://a.b"})
+        self.assertTrue(result["warn"])
+        self.assertNotIn("SECRET123", result["detail"])
+
+    def test_security_layer_skipped_unless_opted_in(self):
+        with mock.patch.object(checks, "_l1_alive",
+                               return_value=({"layer": "L1", "ok": True, "detail": "d"},
+                                             b"body", {}, False)):
+            results = checks.check_site({"url": "http://a.b"}, do_render=False)
+        self.assertFalse(any("L5" in r["layer"] for r in results))
 
 
 class BoardTest(unittest.TestCase):

@@ -23,8 +23,9 @@
 | L2 내용 | 페이지 안 필수 마커 실존 (인코딩 폴백 포함) | **200 거짓 양성** — 살아있는데 빈/에러 페이지 |
 | L3 배포반영 | 캐시 우회(?nc) vs 사용자 시점 버전 비교 + 캐시 정책(max-age) 실측 | **배포했는데 옛 버전이 보이는 상태** |
 | L4 렌더링 | 헤드리스 브라우저 실렌더 → JS 예외·렌더된 화면의 마커 검증 | **HTML은 오는데 화면이 깨진 상태** — JS 크래시, JS로만 그리는 페이지(SPA)의 내용 증발 |
+| L5 보안 | ① 일반 방문자 vs 검색봇 시점 비교 ② Google Safe Browsing 등재 조회 | **해킹당했는데 주인만 모르는 상태** — 검색봇에만 보이는 도박 스팸(클로킹), 구글 위험 사이트 낙인 |
 
-보안 층(L5)은 빌드 중 — `docs/01-스펙.md`·`docs/04-D2-빌드노트.md` 참조.
+L5는 `security: true`로 켠다. 잡는 것과 못 잡는 것을 분명히 — 외부에서 보이는 침해 흔적은 잡지만, **서버 내부 파일 변조·웹쉘·공격 시도 탐지는 구조적으로 불가**하고(외부 관찰자는 자기가 유발한 응답만 본다), 진짜 검색봇 IP를 역방향 DNS로 검증하는 정교한 클로킹도 못 잡는다. 설계 근거·출처 = `docs/03-보안축-리서치.md`.
 
 ## 설치·실행
 
@@ -62,7 +63,17 @@ python -m watcher deploy my-site --expect "여름세일"         # 서버를 못
 
 `markers` = 페이지에 반드시 있어야 할 텍스트. `version_url` = 배포 시 갱신하는 버전 파일(선택 — 없으면 L3 생략). `confirm_checks`(선택, 기본 1) = N회 연속 같은 관측일 때만 상태 확정(순단 플랩 방지). `render`(선택, 기본 false) = L4 렌더링 검증 — 무거워서 opt-in이며 Playwright 필요(`pip install playwright && python -m playwright install chromium`), `watch`에서는 `--render-every N`패스마다 1회(기본 5).
 
-`.env` — 텔레그램 알림. 변수는 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` 두 개 (형식은 `.env.example`). 둘 다 비우면 콘솔 알림 **데모 모드**로 동작.
+`security`(선택, 기본 false) = L5 보안 층 — 클로킹 비교 + Safe Browsing 조회(`GSB_API_KEY` 필요). `spam_keywords`(선택) = 기본 스팸 시그니처에 사이트별 문구 추가.
+
+`.env` — `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`(텔레그램 알림), `GSB_API_KEY`(L5 평판 조회 — Google Cloud 콘솔에서 무료 발급). 형식은 `.env.example`. 텔레그램을 둘 다 비우면 콘솔 알림 **데모 모드**로 동작.
+
+L5 클로킹을 직접 보려면 재현 서버로 확인할 수 있다 (해킹된 사이트를 흉내내 검색봇에게만 스팸을 보여준다):
+
+```bash
+python demo/cloaked_site.py     # http://127.0.0.1:8899
+curl -s http://127.0.0.1:8899                        | grep 바카라   # 안 나옴
+curl -s -A "Googlebot/2.1" http://127.0.0.1:8899     | grep 바카라   # 나옴
+```
 
 ## 알림 정책
 
@@ -74,7 +85,7 @@ python -m watcher deploy my-site --expect "여름세일"         # 서버를 못
 ## 테스트
 
 ```bash
-python -m unittest discover -s tests   # 52개 — 외부 AI 교차 게이트의 회귀 고정
+python -m unittest discover -s tests   # 60개 — 외부 AI 교차 게이트의 회귀 고정
 ```
 
 ## 알려진 한계 (정직하게)

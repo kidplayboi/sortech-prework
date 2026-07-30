@@ -89,14 +89,23 @@ def validate_sites(sites):
             warnings.append(
                 "%s: version_url이 null — 미설정으로 처리(L3 생략). 키를 빼는 걸 권장" % key
             )
-        render = site.get("render")
-        if "render" in site and render is None:
-            warnings.append(
-                "%s: render가 null — 미설정으로 처리(L4 비활성). 키를 빼는 걸 권장" % key
-            )
-        elif render is not None and not isinstance(render, bool):
-            # true 외의 truthy(문자열 "false" 등)를 켜짐으로 오해하는 사고 방지
-            errors.append("%s: render는 true/false여야 함 (현재 %r)" % (key, render))
+        for flag in ("render", "security"):
+            value = site.get(flag)
+            if flag in site and value is None:
+                warnings.append(
+                    "%s: %s가 null — 미설정으로 처리(해당 층 비활성). 키를 빼는 걸 권장"
+                    % (key, flag)
+                )
+            elif value is not None and not isinstance(value, bool):
+                # true 외의 truthy(문자열 "false" 등)를 켜짐으로 오해하는 사고 방지
+                errors.append("%s: %s는 true/false여야 함 (현재 %r)" % (key, flag, value))
+                bad_keys.add(key)
+        spam = site.get("spam_keywords")
+        if spam is not None and (
+            not isinstance(spam, list)
+            or any(not isinstance(k, str) or not k.strip() for k in spam)
+        ):  # 빈 문자열 키워드는 모든 페이지에서 '발견'돼 상시 오탐이 된다 (H-B와 동일 클래스)
+            errors.append("%s: spam_keywords는 비어있지 않은 문자열 리스트여야 함" % key)
             bad_keys.add(key)
         for field in ("confirm_checks", "timeout_sec"):
             if field in site and site[field] is None:
