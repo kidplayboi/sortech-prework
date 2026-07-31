@@ -18,7 +18,7 @@ import urllib.parse
 
 import requests
 
-from . import checks
+from . import checks, cloak_decision
 
 BOT_UA = ("Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)")
 SEARCH_REFERER = "https://www.google.com/search?q=site"
@@ -27,15 +27,6 @@ GSB_THREATS = ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE",
                "POTENTIALLY_HARMFUL_APPLICATION"]
 GSB_TIMEOUT = 10
 SPAM_MAX_SHOW = 3
-# 히트 확인 표본 설계 (15차 P2-1 → 16차 P2-1 교정) — 일반 시점을 **끊기지 않는
-# 연속 블록**으로 뜬다. 히트 시 실제 요청 배치는
-#   일반(0) 봇(1) │ 일반 2..9 (연속 블록) │ 봇 10, 11
-# 이고, 연속 8개의 요청 인덱스 {2..9} mod P는 P<=8이면 전체 잔여류를 포함하므로
-# 스팸이 어느 회차에 실려 있어도 일반 시점이 반드시 본다(위상 독립).
-# ⚠️봇 표본을 블록 중간에 끼우면 그 요청이 인덱스를 소비해 연속성이 깨지고
-#   근거가 무너진다 — 16차에 주기 4·8·12에서 6/6 오탐으로 실측됐다.
-USER_SAMPLES = 8      # 연속 블록 길이 — 결정적 회전 주기 <=8을 구조적으로 커버
-BOT_SAMPLES = 3       # 봇 시점 표본 — 간헐 클로킹 미탐 완화(1회 이상 노출로 후보 유지)
 
 # 클로킹 심은 페이지에 실제로 박히는 유인 문구들 (도박·성인 스팸 계열).
 # 대량 살포형 시그니처 — 사이트별 추가는 sites.json의 spam_keywords로.
@@ -46,78 +37,162 @@ SPAM_KEYWORDS = [
 ]
 
 
-def check_security(site):
-    """반환: L5 결과 리스트 (클로킹·평판 각 0~1건). 앞 층처럼 dict 형식."""
-    results = [check_cloaking(site)]
+def check_security(site, memory=None):
+    """반환: L5 결과 리스트 (클로킹·평판 각 0~1건). 앞 층처럼 dict 형식.
+
+    memory = 이 사이트의 클로킹 누적 기억(dict). 제자리 갱신되므로 호출자가
+    state.json에 보존한다. None이면 이 패스 한정 임시 기억으로 동작한다 —
+    누적이 없으니 회전 페이지는 확정되지 않고 WARN까지만 간다(읽기 전용 축소).
+    """
+    results = [check_cloaking(site, memory)]
     reputation = check_reputation(site)
     if reputation is not None:
         results.append(reputation)
     return results
 
 
-def check_cloaking(site):
-    """일반 방문자 시점 vs 검색봇 시점 본문 비교.
+def check_cloaking(site, memory=None):
+    """일반 방문자 시점 vs 검색봇 시점 본문 비교. **판정은 cloak_decision**이 한다.
 
-    판정: 봇 시점에만 스팸 문구가 있으면 FAIL(클로킹 의심) / 봇 시점에서 이 사이트의
-    마커가 사라지면 WARN(수상한 분기 — 봇 차단 WAF일 수도 있어 단정하지 않는다).
-    스팸 문구가 양쪽에 다 있으면 클로킹이 아니라 사이트 자체 성격이므로 통과.
+    이 함수의 책임은 요청 배치와 결과 문구뿐이다. 판정 축 3개(회전 감지·패스 간
+    누적·위상 무작위화)와 그 근거는 `watcher/cloak_decision.py` 모듈 docstring에
+    있다 — 13~17차에 같은 오탐이 다섯 번 반복된 뒤 축을 바꾼 재설계다.
 
-    스팸 히트는 **일반 시점을 끊기지 않는 연속 블록으로 USER_SAMPLES회 떠서
-    그 키워드가 단 한 번도 나오지 않을 때만** 확정한다. 고정 위치로 양쪽을
-    번갈아 뜨는 방식은 회전 주기가 총 요청 수와 맞물리면 위상이 매 패스 고정돼
-    영구 오탐이 났고(15차 P2-1), 봇 표본을 블록 중간에 끼우면 그 요청이 인덱스를
-    소비해 연속성 근거 자체가 무너졌다(16차 P2-1 — 주기 4·8·12에서 6/6 오탐).
-    봇 조건은 반대로 완화해(1회 이상 노출) 간헐 클로킹 미탐을 줄인다 —
-    오탐(위상)과 미탐(간헐)을 서로 다른 장치로 다룬다 (15차 P3-3).
+    요청 비용: 후보가 없으면 **2회**(일반·봇 각 1). 후보가 잡힌 패스만 확장
+    표본으로 올라간다 — 남의 사이트에 평시 부담을 주지 않기 위한 경계다.
     """
     timeout = site.get("timeout_sec", 10)
-    keywords = _keywords(site)
+    store = memory if isinstance(memory, dict) else {}
     try:
-        user_text, user_note = _fetch_view(site["url"], timeout)
-        bot_text, bot_note = _fetch_view(site["url"], timeout, ua=BOT_UA,
-                                         referer=SEARCH_REFERER)
+        user_first, user_note = _fetch_view(site["url"], timeout)
+        bot_first, bot_note = _fetch_view(site["url"], timeout, ua=BOT_UA,
+                                          referer=SEARCH_REFERER)
     except requests.RequestException as exc:
         return _unknown_cloak("요청 실패: %s" % type(exc).__name__)
-    # 부분 수신·비200은 "일치"로 통과시키면 거짓 음성이 된다 (13차 P3-2)
+    # 부분 수신·비200은 "일치"로 통과시키면 거짓 음성이 된다 (13차 P3-2).
+    # 이 경로는 누적 기억을 건드리지 않는다 — 못 본 것을 반증으로 치지 않는다
     if user_note or bot_note:
         return _unknown_cloak(user_note or bot_note)
 
-    rotating = ""
-    bot_only = [k for k in keywords if k in bot_text and k not in user_text]
-    if bot_only:
+    spam = [k for k in _keywords(site) if k in bot_first and k not in user_first]
+    lost = [m for m in (site.get("markers") or [])
+            if m in user_first and m not in bot_first]
+    user_texts, bot_texts = [user_first], [bot_first]
+    if spam or lost:
         try:
-            verdict = _confirm_bot_only(site, timeout, bot_only, bot_text)
+            note = _gather(site, timeout, spam, lost, user_texts, bot_texts)
         except requests.RequestException as exc:
             return _unknown_cloak("재확인 실패: %s" % type(exc).__name__)
-        if verdict.get("note"):
-            return _unknown_cloak(verdict["note"])
-        if verdict["confirmed"]:
-            shown = ", ".join(verdict["confirmed"][:SPAM_MAX_SHOW])
-            more = (" 외 %d개" % (len(verdict["confirmed"]) - SPAM_MAX_SHOW)
-                    if len(verdict["confirmed"]) > SPAM_MAX_SHOW else "")
-            return {
-                "layer": "L5 클로킹", "ok": False,
-                "detail": "검색봇에게만 보이는 스팸 문구: %s%s (일반 시점 %d회 전부 부재·"
-                          "검색봇 시점 %d/%d 노출) — 침해 의심, 소스·서버 점검 필요"
-                          % (shown, more, verdict["user_seen"],
-                             verdict["bot_hits"], verdict["bot_seen"]),
-            }
-        # 기각 사유는 보관만 하고 마커 비교로 계속 진행한다 — 여기서 조기 반환하면
-        # 봇 시점의 마커 소실(WARN)이 은폐된다 (14차 P3-2를 주석만 달고 return을
-        # 남겨둔 것이 15차 P3-1로 재적발됐다 — 코드로 실제 이행)
-        rotating = "회전 콘텐츠로 판단(일반 시점 %d회 중 노출 확인: %s)" % (
-            verdict["user_seen"], ", ".join(bot_only[:SPAM_MAX_SHOW]))
+        if note:
+            return _unknown_cloak(note)
 
-    markers = site.get("markers") or []
-    missing = [m for m in markers if m in user_text and m not in bot_text]
-    if missing:
-        return {
-            "layer": "L5 클로킹", "ok": False, "warn": True,
-            "detail": "검색봇 시점에서 핵심 내용 사라짐: %s (봇 차단 설정일 수도 있음)"
-                      % ", ".join(missing),
-        }
-    return {"layer": "L5 클로킹", "ok": True,
-            "detail": rotating or "일반/검색봇 시점 일치"}
+    working = cloak_decision.load_memory(store)
+    verdict = cloak_decision.evaluate(spam, lost, user_texts, bot_texts, working)
+    store.clear()
+    store.update(working)
+    return _cloak_result(verdict)
+
+
+def _gather(site, timeout, spam, lost, user_texts, bot_texts):
+    """후보가 잡힌 패스에만 도는 확장 표본 수집. 반환 = 비교 불가 사유(없으면 "").
+
+    ① 일반 표본은 **끊기지 않는 한 블록**으로 뜬다. 16차에는 '연속 N개가 mod P의
+       전 잔여류를 덮는다'가 근거였고 그 근거는 P>N에서 무너졌지만(17차), 연속성
+       자체는 **축 1(회전 감지)의 전제**로 그대로 살아 있다 — 봇 요청을 중간에
+       끼우면 일반 표본이 같은 잔여류에 갇혀 주기 2짜리 회전도 "변화 없음"으로
+       오판된다. 즉 같은 코드 형태를 다른 이유로 유지한다.
+    ② 봇 추가 표본은 블록 **뒤**에서 뜬다. 즉시 확정의 과반 조건과, 마커가 정말
+       봇에게 안 보이는지의 재확인(17차 P2-2)이 여기에 달려 있다.
+    ③ 후보가 전부 반증되면 즉시 종료 — 회전 사이트에 매 패스 최대 요청을 쏟지
+       않는다 (15차 P3-5의 조기 종료 계약 유지).
+    """
+    for _ in range(cloak_decision.user_sample_count()):
+        text, note = _fetch_view(site["url"], timeout)
+        if note:
+            return note
+        user_texts.append(text)
+        if not _alive(spam, lost, user_texts):
+            return ""
+    while len(bot_texts) < cloak_decision.BOT_SAMPLES:
+        text, note = _fetch_view(site["url"], timeout, ua=BOT_UA,
+                                 referer=SEARCH_REFERER)
+        if note:
+            return note
+        bot_texts.append(text)
+    return ""
+
+
+def _alive(spam, lost, user_texts):
+    """일반 표본만으로 아직 살아 있는 후보가 있는가 (조기 종료 판정용)"""
+    return (any(all(k not in text for text in user_texts) for k in spam)
+            or any(all(m in text for text in user_texts) for m in lost))
+
+
+def _cloak_result(verdict):
+    """판정 → 층 결과 dict. 확정 FAIL > 확정 WARN > 의심 WARN > 통과 순."""
+    if verdict["spam_confirmed"]:
+        return {"layer": "L5 클로킹", "ok": False, "detail": _spam_detail(verdict)}
+    warns = []
+    if verdict["marker_confirmed"]:
+        carried = (" · 이번 표본에서는 미관측(누적 유지)"
+                   if all(m in verdict["marker_unseen"]
+                          for m in verdict["marker_confirmed"]) else "")
+        warns.append("검색봇 시점에서 핵심 내용 사라짐: %s (봇 차단 설정일 수도 있음)%s"
+                     % (_show(verdict["marker_confirmed"]), carried))
+    if verdict["spam_suspect"]:
+        warns.append("클로킹 의심 — 검색봇 시점에만 스팸 문구: %s (%s)"
+                     % (_show([k for k, _ in verdict["spam_suspect"]]),
+                        _pending_note(verdict, verdict["spam_suspect"],
+                                      verdict["spam_unseen"])))
+    if verdict["marker_suspect"]:
+        warns.append("검색봇 시점에서만 핵심 내용 사라짐 의심: %s (%s)"
+                     % (_show([m for m, _ in verdict["marker_suspect"]]),
+                        _pending_note(verdict, verdict["marker_suspect"],
+                                      verdict["marker_unseen"])))
+    if warns:
+        return {"layer": "L5 클로킹", "ok": False, "warn": True,
+                "detail": " · ".join(warns)}
+    if verdict["rejected_spam"] or verdict["rejected_marker"]:
+        return {"layer": "L5 클로킹", "ok": True,
+                "detail": "회전 콘텐츠로 판단(일반 시점 %d회 중 확인: %s)"
+                          % (verdict["user_seen"],
+                             _show(verdict["rejected_spam"] + verdict["rejected_marker"]))}
+    return {"layer": "L5 클로킹", "ok": True, "detail": "일반/검색봇 시점 일치"}
+
+
+def _spam_detail(verdict):
+    keys = verdict["spam_confirmed"]
+    if all(k in verdict["spam_unseen"] for k in keys):
+        # 이번 표본엔 안 나왔지만 확정은 유지된다 — 관측의 부재는 해소가 아니다.
+        # 여기서 "정상"으로 돌리면 간헐 클로커가 매 패스 🔴🟢로 튄다
+        return ("검색봇 전용 스팸 문구 확정 유지: %s (이번 표본에서는 미관측 — 봇에게만"
+                " 간헐 노출하는 수법이라 한 번 안 보인 것은 해소가 아니다)" % _show(keys))
+    hits = max((verdict["bot_hits"].get(k, 0) for k in keys), default=0)
+    across = (" · 회전 페이지에서 %d패스 누적" % verdict["confirm_passes"]
+              if verdict["rotating"] else "")
+    return ("검색봇에게만 보이는 스팸 문구: %s (일반 시점 %d회 전부 부재·검색봇 시점 "
+            "%d/%d 노출%s) — 침해 의심, 소스·서버 점검 필요"
+            % (_show(keys), verdict["user_seen"], hits, verdict["bot_seen"], across))
+
+
+def _pending_note(verdict, suspects, unseen):
+    """왜 아직 확정하지 않는지를 그대로 쓴다 — 침묵도 빨간 오보도 아닌 중간 상태"""
+    streak = max(n for _, n in suspects)
+    if all(key in unseen for key, _ in suspects):
+        why = "이번 표본에서는 미관측 — 누적 감쇠 중"
+    elif verdict["rotating"]:
+        why = "회전 콘텐츠라 한 패스로 확정하지 않음"
+    else:
+        why = "봇 시점 노출이 %d/%d — 과반 미달" % (
+            max(verdict["bot_hits"].values(), default=0), verdict["bot_seen"])
+    return "%s · %d/%d패스 · 일반 시점 %d회 부재" % (
+        why, streak, verdict["confirm_passes"], verdict["user_seen"])
+
+
+def _show(keys):
+    more = (" 외 %d개" % (len(keys) - SPAM_MAX_SHOW)
+            if len(keys) > SPAM_MAX_SHOW else "")
+    return ", ".join(keys[:SPAM_MAX_SHOW]) + more
 
 
 def check_reputation(site):
@@ -159,54 +234,6 @@ def check_reputation(site):
                 "detail": "Google 위험 사이트 등재: %s — 방문자에게 경고 화면이 뜨는 상태"
                           % ", ".join(kinds)}
     return {"layer": "L5 평판", "ok": True, "detail": "Google 등재 없음"}
-
-
-def _confirm_bot_only(site, timeout, candidates, first_bot_text):
-    """봇 전용 스팸 후보를 확정/기각한다 (15차 P2-1 재설계).
-
-    확정 조건 = 일반 시점 연속 USER_SAMPLES회에 **한 번도** 없고, 봇 시점
-    BOT_SAMPLES회 중 **1회 이상** 노출. 요청 배치는
-    `일반(0) 봇(1) │ 일반 2..9 │ 봇 10,11` — 가운데 블록이 연속이라 주기<=8의
-    모든 회차를 덮는다(위상 독립). 이 연속성은 문구가 아니라 테스트가 지킨다
-    (`test_user_samples_are_one_unbroken_block` — 요청 순서를 계측해 단언).
-
-    후보가 일반 시점에서 관측되는 순간 즉시 기각하고 남은 표본을 생략한다 —
-    회전 사이트에 매 패스 최대 요청을 쏟지 않기 위한 조기 종료 (15차 P3-5).
-    요청 수 실측: 무히트 2 · 조기 기각 4 · 진짜 클로킹(최악) 12.
-    반환: {confirmed, user_seen, bot_seen, bot_hits, note}
-    """
-    remaining = list(candidates)
-    bot_hits = {k: 1 for k in remaining}  # 1차 봇 관측 포함
-    bot_seen, user_seen = 1, 0
-    # ① 일반 표본을 **끊기지 않는 한 블록**으로 뜬다. 봇 요청을 중간에 끼우면
-    #    그 요청이 인덱스를 소비해 일반 표본이 더 이상 연속이 아니게 되고,
-    #    연속성이 근거였던 위상 독립이 무너진다 (16차 P2-1 — index%3==2에
-    #    봇을 끼운 탓에 주기 4·8·12에서 6/6 오탐, 4와 12는 영구)
-    for _ in range(USER_SAMPLES):
-        user_text, note = _fetch_view(site["url"], timeout)
-        if note:
-            return {"confirmed": [], "user_seen": user_seen, "bot_seen": bot_seen,
-                    "bot_hits": 0, "note": note}
-        user_seen += 1
-        remaining = [k for k in remaining if k not in user_text]
-        if not remaining:  # 일반 시점에도 있다 = 클로킹 아님 (조기 종료)
-            return {"confirmed": [], "user_seen": user_seen, "bot_seen": bot_seen,
-                    "bot_hits": 0, "note": ""}
-    # ② 봇 추가 표본은 블록 **밖**(뒤)에서 — 판정 근거 수치를 채우되 일반 블록의
-    #    연속성을 건드리지 않는다
-    while bot_seen < BOT_SAMPLES:
-        bot_text, note = _fetch_view(site["url"], timeout, ua=BOT_UA,
-                                     referer=SEARCH_REFERER)
-        if note:
-            return {"confirmed": [], "user_seen": user_seen, "bot_seen": bot_seen,
-                    "bot_hits": 0, "note": note}
-        bot_seen += 1
-        for key in remaining:
-            if key in bot_text:
-                bot_hits[key] += 1
-    confirmed = [k for k in remaining if bot_hits[k] >= 1]
-    return {"confirmed": confirmed, "user_seen": user_seen, "bot_seen": bot_seen,
-            "bot_hits": max([bot_hits[k] for k in confirmed], default=0), "note": ""}
 
 
 def _fetch_view(url, timeout, ua=checks.UA, referer=None):

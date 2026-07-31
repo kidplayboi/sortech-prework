@@ -1,4 +1,6 @@
-"""층 모듈 회귀 테스트 — L4 렌더링·L5 보안·상태보드·deploy 집중 모드 (D2).
+﻿"""층 모듈 회귀 테스트 — L4 렌더링·L5 평판·상태보드·deploy 집중 모드 (D2).
+
+L5 **클로킹 판정**은 분량이 커져 `test_cloaking.py`로 분리했다 (500라인 규칙).
 """
 import contextlib
 import io
@@ -12,90 +14,15 @@ import unittest
 from unittest import mock
 
 try:  # discover -s tests (경로 삽입) 와 python -m unittest tests.test_layers 양쪽 지원
-    from helpers import _DemoHandler, _RotatingHandler
+    from helpers import _DemoHandler
 except ImportError:  # pragma: no cover - 실행 방식에 따른 분기 (14차 P3-3)
-    from .helpers import _DemoHandler, _RotatingHandler
+    from .helpers import _DemoHandler
 from watcher import board, checks, deploy, notify, security
 from watcher.cli import run_pass
 
 
-class SecurityLayerTest(unittest.TestCase):
-    """L5 보안 축 (D2 슬라이스 ④) — 클로킹 판정·GSB 평판"""
-
-    def _cloak(self, user_text, bot_text, markers=("데모샵",)):
-        """고정 응답 — 매 회차 같은 내용이라 재확인(13차 P2-6)도 같은 결과가 나온다"""
-        def fake(url, timeout, ua=checks.UA, referer=None):
-            return (bot_text if ua == security.BOT_UA else user_text), ""
-
-        site = {"url": "http://a.b", "markers": list(markers), "timeout_sec": 5}
-        with mock.patch.object(security, "_fetch_view", side_effect=fake):
-            return security.check_cloaking(site)
-
-    def test_bot_only_spam_is_fail(self):
-        """검색봇에만 도박 문구 = 클로킹 의심 (한국 실측 수법)"""
-        result = self._cloak("데모샵 정상 페이지", "데모샵 바카라 카지노 먹튀검증")
-        self.assertFalse(result["ok"])
-        self.assertNotIn("warn", result)
-        self.assertIn("바카라", result["detail"])
-
-    def test_spam_on_both_sides_is_not_cloaking(self):
-        """양쪽에 다 있으면 사이트 성격 — 클로킹 아님(오탐 방지)"""
-        result = self._cloak("카지노 리뷰 사이트 데모샵", "카지노 리뷰 사이트 데모샵")
-        self.assertTrue(result["ok"], result["detail"])
-
-    def test_marker_vanishing_for_bot_is_warn_not_fail(self):
-        """봇 차단 WAF일 수도 있어 단정하지 않는다"""
-        result = self._cloak("데모샵 정상", "Access Denied")
-        self.assertFalse(result["ok"])
-        self.assertTrue(result["warn"])
-        self.assertIn("사라짐", result["detail"])
-
-    def test_custom_spam_keyword_from_site_config(self):
-        def fake(url, timeout, ua=checks.UA, referer=None):
-            return ("정상" if ua != security.BOT_UA else "정상 특정광고문구"), ""
-
-        site = {"url": "http://a.b", "markers": [], "spam_keywords": ["특정광고문구"]}
-        with mock.patch.object(security, "_fetch_view", side_effect=fake):
-            result = security.check_cloaking(site)
-        self.assertFalse(result["ok"])
-        self.assertIn("특정광고문구", result["detail"])
-
-    def test_rotating_spam_is_rejected_early(self):
-        """13차 P2-6 + 15차 P3-5: 일반 시점 재표본에서 그 문구가 관측되는 순간
-        즉시 기각한다 — 남은 표본까지 다 뜨면 남의 사이트에 매 패스 부담이 된다"""
-        seq = iter([
-            ("정상 데모샵", ""),                  # 일반 1차
-            ("정상 데모샵 바카라 배너", ""),      # 봇 1차 — 히트
-            ("정상 데모샵 바카라 배너", ""),      # 일반 재표본 — 여기서 즉시 기각
-        ])
-        calls = []
-
-        def fake(url, timeout, ua=checks.UA, referer=None):
-            calls.append(ua)
-            return next(seq)
-
-        with mock.patch.object(security, "_fetch_view", side_effect=fake):
-            result = security.check_cloaking(
-                {"url": "http://a.b", "markers": ["데모샵"], "timeout_sec": 5})
-        self.assertTrue(result["ok"], result["detail"])
-        self.assertIn("회전 콘텐츠", result["detail"])
-        self.assertEqual(len(calls), 3)  # 조기 종료 — 8표본을 다 뜨지 않는다
-
-    def test_repeated_spam_is_confirmed_fail(self):
-        """반대 방향 음성 대조 — 2회 연속 재현되면 확정 FAIL이어야 한다"""
-        result = self._cloak("정상 데모샵", "정상 데모샵 바카라")
-        self.assertFalse(result["ok"])
-        self.assertNotIn("warn", result)
-        self.assertIn("일반 시점 8회 전부 부재", result["detail"])
-
-    def test_non_200_view_is_unknown_not_match(self):
-        """13차 P3-2: 비200·부분 수신을 '일치'로 통과시키면 거짓 음성"""
-        with mock.patch.object(security, "_fetch_view",
-                               side_effect=lambda *a, **k: ("", "검색봇 시점 응답 HTTP 403")):
-            result = security.check_cloaking({"url": "http://a.b", "markers": []})
-        self.assertFalse(result["ok"])
-        self.assertTrue(result["unknown"])
-        self.assertIn("비교 불가", result["detail"])
+class ReputationLayerTest(unittest.TestCase):
+    """L5 평판 축 (D2 슬라이스 ④) — Google Safe Browsing 조회"""
 
     def test_missing_gsb_key_warns_not_silent_pass(self):
         """noop이 실패를 성공처럼 보고하는 클래스 차단 + 13차 P2-3: '검증 불가'는
@@ -132,93 +59,6 @@ class SecurityLayerTest(unittest.TestCase):
                                              b"body", {}, False)):
             results = checks.check_site({"url": "http://a.b"}, do_render=False)
         self.assertFalse(any("L5" in r["layer"] for r in results))
-
-
-class CloakingRealServerTest(unittest.TestCase):
-    """14차 P2-1 — 스텁이 아닌 **실서버**로 오탐/탐지를 동시에 고정한다.
-    스텁은 "재확인에서 스팸이 사라진다"는 가정만 고정해 수리를 검증하지 못했다."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _RotatingHandler)
-        cls.server.daemon_threads = True
-        cls.port = cls.server.server_address[1]
-        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.server.shutdown()
-
-    def setUp(self):
-        _RotatingHandler.ROTATION.clear()  # 위상을 매 테스트 초기화
-
-    def _site(self, path):
-        return {"url": "http://127.0.0.1:%d%s" % (self.port, path),
-                "markers": ["데모샵"], "timeout_sec": 10}
-
-    def test_sequential_rotation_is_not_flagged_any_period(self):
-        """순차 회전 — 주기 2·3(14차 8/8 오탐)과 **5·6·7**(15차 수학적 취약 구간,
-        특히 6은 위상 고정으로 6/6 영구 오탐)을 전부 여러 패스 반복해 고정한다.
-        고정 위치 표본을 쓰면 어떤 표본 수 N이든 P=2N에서 재발하므로, 취약 주기를
-        열거하는 것만으로는 부족하고 판정 구조 자체가 위상 독립이어야 한다."""
-        for path in ("/rotate2", "/rotate3", "/rotate4", "/rotate5", "/rotate6",
-                     "/rotate7", "/rotate8", "/rotate12"):
-            for pass_no in range(4):
-                result = security.check_cloaking(self._site(path))
-                self.assertTrue(result["ok"],
-                                "%s 패스%d: %s" % (path, pass_no, result["detail"]))
-
-    def test_user_samples_are_one_unbroken_block(self):
-        """16차 P2-1의 근거를 직접 단언한다 — 일반 표본이 요청 인덱스 상에서
-        연속이어야 위상 독립이 성립한다. 봇 요청을 블록 중간에 끼우면 이 단언이
-        깨지고 주기 4·8·12 오탐이 되살아난다(서술이 아니라 계측으로 고정)."""
-        order = []
-        real_fetch = security._fetch_view
-
-        def spy(url, timeout, ua=checks.UA, referer=None):
-            order.append("bot" if ua == security.BOT_UA else "user")
-            return real_fetch(url, timeout, ua=ua, referer=referer)
-
-        with mock.patch.object(security, "_fetch_view", side_effect=spy):
-            security.check_cloaking(self._site("/cloak"))  # 진짜 클로킹 = 전 표본 소진
-        user_indexes = [i for i, who in enumerate(order) if who == "user"]
-        block = user_indexes[1:]  # 1차 일반 표본 이후가 확인 블록
-        self.assertEqual(len(block), security.USER_SAMPLES)
-        self.assertEqual(block, list(range(block[0], block[0] + len(block))))
-
-    def test_real_cloaking_still_detected(self):
-        """반대 방향 — 진짜 클로킹은 여전히 하드 FAIL이어야 한다(탐지력 보존)"""
-        result = security.check_cloaking(self._site("/cloak"))
-        self.assertFalse(result["ok"])
-        self.assertNotIn("warn", result)
-        self.assertIn("바카라", result["detail"])
-
-    def test_intermittent_cloaking_still_detected(self):
-        """15차 P3-3: '봇 표본 전부 노출' 조건은 간헐 클로커를 미탐(50%→8%)으로
-        만들었다 — 봇 조건을 1회 이상으로 완화해 잡는다(오탐은 일반 표본이 담당)"""
-        result = security.check_cloaking(self._site("/cloak-intermittent"))
-        self.assertFalse(result["ok"])
-        self.assertIn("바카라", result["detail"])
-
-    def test_rotation_rejection_does_not_hide_marker_loss(self):
-        """15차 P3-1: 스팸이 기각돼도 마커 소실 WARN이 은폐되면 안 된다
-        (14차에 주석만 달고 조기 반환을 남겨둔 것이 재적발됐다)"""
-        site = self._site("/rotate6")
-        site["markers"] = ["장바구니"]
-        seq = iter([
-            ("데모샵 장바구니", ""),                    # 일반 1차
-            ("데모샵 바카라", ""),                      # 봇 1차 — 히트 + 마커 소실
-            ("데모샵 장바구니 바카라", ""),             # 일반 재표본 → 스팸 기각
-        ])
-
-        def fake(url, timeout, ua=checks.UA, referer=None):
-            return next(seq)
-
-        with mock.patch.object(security, "_fetch_view", side_effect=fake):
-            result = security.check_cloaking(site)
-        self.assertFalse(result["ok"])
-        self.assertTrue(result["warn"])
-        self.assertIn("사라짐", result["detail"])
 
 
 class IntermittentLayerTest(unittest.TestCase):

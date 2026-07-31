@@ -113,13 +113,22 @@ class _RotatingHandler(http.server.BaseHTTPRequestHandler):
     # 그중 P=6은 총 요청 수와 맞물려 위상 이동이 0이라 영구 오탐이었다.
     # 잔여류 {1,2,4}에 스팸을 실어 그 조건을 그대로 재현한다.
     # 주기 4·8·12는 16차에 6/6 오탐(4·12는 영구)이 실측된 구간 — 봇 표본이
-    # 일반 블록 중간에 끼어 연속성을 깨뜨렸을 때 정확히 뚫리는 주기들이다
-    SPAM_RESIDUES = {"/rotate2": {1}, "/rotate3": {1}, "/rotate4": {1},
-                     "/rotate5": {1, 2, 4}, "/rotate6": {1, 2, 4},
+    # 일반 블록 중간에 끼어 연속성을 깨뜨렸을 때 정확히 뚫리는 주기들이다.
+    #
+    # ⚠️17차 오답 24호: `/rotate12`의 잔여류 {1,5,9}는 **구(舊) 배치의 봇 인덱스**라
+    #   신 배치(일반 블록 2..9)가 5와 9를 반드시 밟는다 — 결함이 있어도 RED가 될 수
+    #   없는 픽스처였다. "통과한 게 아니라 못 걸린 것". 이 경로는 15차 조건의
+    #   음성 대조로 남기고, 주기 12 커버리지는 아래 `/rotate12single`이 맡는다.
+    # 잔여류를 안 적은 경로는 기본 {1} — 배너 P개 중 1개에만 도박 문구가 실리는
+    # 가장 자연스러운 모양이고, 이게 판정을 실제로 깨는 조건이다
+    SPAM_RESIDUES = {"/rotate5": {1, 2, 4}, "/rotate6": {1, 2, 4},
                      "/rotate7": {1, 2, 4}, "/rotate8": {1, 5},
                      "/rotate12": {1, 5, 9}}
     PERIODS = {"/rotate2": 2, "/rotate3": 3, "/rotate4": 4, "/rotate5": 5,
-               "/rotate6": 6, "/rotate7": 7, "/rotate8": 8, "/rotate12": 12}
+               "/rotate6": 6, "/rotate7": 7, "/rotate8": 8, "/rotate9": 9,
+               "/rotate10": 10, "/rotate11": 11, "/rotate12": 12,
+               "/rotate12single": 12, "/rotate13": 13, "/rotate14": 14,
+               "/rotate15": 15, "/rotate16": 16}
 
     def do_GET(self):
         path = self.path.split("?")[0]

@@ -66,7 +66,9 @@ def run_pass(sites, st, alert, persist=True, do_render=True, carry=None):
     """전 사이트 1회 체크. 사이트 하나의 예외가 전체 순찰을 죽이지 않게 격리(P2-3).
 
     alert=False(status 명령)면 state를 읽지도 쓰지도 않는다 — 조회가 전이를
-    소비해 장애 알림이 증발하던 문제(P1-2)의 교정.
+    소비해 장애 알림이 증발하던 문제(P1-2)의 교정. 그 계약 때문에 L5 클로킹의
+    **패스 간 누적도 status에서는 성립하지 않는다** — 회전 페이지는 확정까지 못
+    가고 WARN까지만 보인다. 조회 명령이 판정을 앞당기지 않는 쪽이 옳다(정직한 축소).
     do_render=False면 이 패스에서 L4(무거움)를 생략 — watch의 --render-every 주기.
     carry(dict)를 주면 스킵된 간헐 층의 직전 결과를 승계한다 (P1-1 — 거짓 복구 차단).
     반환: (rows, sent_texts) — 상태보드(D2 슬라이스 ③)가 소비. rows의 layers는
@@ -75,8 +77,10 @@ def run_pass(sites, st, alert, persist=True, do_render=True, carry=None):
     rows, sent_texts = [], []
     for key, site in sites.items():
         results = []
+        cloak_memory = state_mod.read_cloak(st, key) if alert else None
         try:
-            results = checks.check_site(site, do_render=do_render)
+            results = checks.check_site(site, do_render=do_render,
+                                        cloak_memory=cloak_memory)
             if carry is not None:
                 results = _carry_layers(results, carry.setdefault(key, {}))
             status, reason = state_mod.summarize(results)
@@ -93,6 +97,9 @@ def run_pass(sites, st, alert, persist=True, do_render=True, carry=None):
             obs = state_mod.observe(
                 st, key, status, reason, confirm=site.get("confirm_checks", 1)
             )
+            # observe 뒤에 쓴다 — 스키마 손상 엔트리를 observe가 재초기화하므로
+            # 앞에서 쓰면 첫 패스의 누적이 그대로 증발한다
+            state_mod.write_cloak(st, key, cloak_memory)
             # 현재 진행 중인 장애를 먼저 — 과거 순단의 사후 보고가 지금의 🔴을
             # 선점하면 안 된다 (K-C: elif 구조였을 때 1인터벌 지연·once 1회 누락)
             if obs["status"] is not None and obs["status"] != obs["prev_notified"]:

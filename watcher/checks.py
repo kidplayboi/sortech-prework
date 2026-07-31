@@ -35,12 +35,16 @@ VERSION_MAX_LEN = 64
 READ1_CHUNK = 65536  # size cap 오버슈트 상한 = 이 값 — 본문이 상한+64KB까지 커질 수 있다 (9차 P3-3)
 
 
-def check_site(site, do_render=True):
+def check_site(site, do_render=True, cloak_memory=None):
     """층 결과 리스트를 반환한다. 결과 dict 계약:
     ok=True 통과 / ok=False+warn=True 주의 / ok=False 장애 /
     **unknown=True = "검증 불가"** (도구 미설치·키 미설정 등 — 사이트 문제가 아니다.
     13차 게이트 P2-2·P2-3: 이걸 실패와 섞으면 체커 설치 문제가 사이트 장애로
     오귀속되고 배포 안정 판정이 영구 불가가 된다)
+
+    cloak_memory = L5 클로킹의 패스 간 누적 기억(dict, 제자리 갱신). 한 패스의
+    유한 표본으로는 회전 콘텐츠와 클로킹을 가를 수 없다는 것이 17차 결론이라
+    판정이 패스를 넘어 이어진다 — 호출자가 이 dict를 보존해야 축 2가 성립한다.
     """
     results = []
 
@@ -94,7 +98,7 @@ def check_site(site, do_render=True):
         if not _has_hard_fail(results):
             from . import security  # 지연 임포트 — 층별 모듈 독립성 유지
 
-            results.extend(security.check_security(site))
+            results.extend(security.check_security(site, cloak_memory))
 
     return results
 

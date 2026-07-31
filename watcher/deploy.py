@@ -33,8 +33,13 @@ def run_deploy_watch(key, site, expect=None, expect_version=None, interval=15,
     notify.send("🚀 [%s] 배포 검증 시작 — %s, %d초 간격 집중 감시"
                 % (name, _goal_desc(site, expect, expect_version), interval))
     stable, fails, last_pending, last_detail = 0, 0, None, ""
+    # L5 클로킹 누적 기억은 **세션 로컬**이다 — 이 모듈은 state.json을 읽지도
+    # 쓰지도 않는 일회성 판정 세션이라 평시 순찰의 누적을 빌려오지 않는다.
+    # 집중 모드는 간격이 짧아(기본 15초) 한 세션 안에서 축 2가 성립한다
+    cloak_memory = {}
     while True:
-        verdict, detail, unknowns = _one_check(site, expect, expect_version)
+        verdict, detail, unknowns = _one_check(site, expect, expect_version,
+                                               cloak_memory)
         last_detail = detail
         print("[deploy] %s · %s" % (verdict, detail))
         if verdict == VERDICT_OK:
@@ -103,7 +108,7 @@ def _goal_desc(site, expect, expect_version):
     return "전 층 정상 (버전 목표 미지정)"
 
 
-def _one_check(site, expect, expect_version):
+def _one_check(site, expect, expect_version, cloak_memory=None):
     """한 번의 집중 체크 → (verdict, detail, unknown_notes).
 
     L3(버전 목표)는 이 모듈이 앵커 의미론으로 직접 판정한다 — 층 검증은
@@ -119,7 +124,8 @@ def _one_check(site, expect, expect_version):
     """
     probe = dict(site)
     probe.pop("version_url", None)
-    results = checks.check_site(probe, do_render=site.get("render") is True)
+    results = checks.check_site(probe, do_render=site.get("render") is True,
+                                cloak_memory=cloak_memory)
     unknowns = ["%s %s" % (r["layer"], r["detail"]) for r in results if r.get("unknown")]
     hard = [r for r in results if not r["ok"] and not r.get("warn")]
     if hard:

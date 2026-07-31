@@ -143,6 +143,25 @@ def clear_missed(state, site_key):
     state[site_key].pop("pending_missed_duration", None)
 
 
+def read_cloak(state, site_key):
+    """L5 클로킹 누적 기억을 꺼낸다 — 없거나 형태가 이상하면 빈 기억."""
+    entry = state.get(site_key)
+    memory = entry.get("cloak") if isinstance(entry, dict) else None
+    return dict(memory) if isinstance(memory, dict) else {}
+
+
+def write_cloak(state, site_key, memory):
+    """누적 기억을 보존한다. **observe() 뒤에 호출해야 한다** — 스키마가 깨진
+    엔트리는 observe가 통째로 재초기화하므로 그 전에 쓰면 지워진다.
+    빈 기억은 저장하지 않는다(state.json에 죽은 키를 남기지 않음)."""
+    entry = state.setdefault(site_key, {})
+    live = {kind: dict(bucket) for kind, bucket in (memory or {}).items() if bucket}
+    if live:
+        entry["cloak"] = live
+    else:
+        entry.pop("cloak", None)
+
+
 def _entry_broken(entry):
     """키 존재 + 값 타입까지 검사 — 타입 손상 엔트리가 매 패스 예외로 한 사이트를
     영구 무력화하는 것 방지 (H-D)."""
@@ -162,7 +181,7 @@ def _entry_broken(entry):
     for optional_field, expected in (("last_change_duration", int), ("pending_missed", str),
                                      ("pending_missed_duration", int),
                                      ("unnotified_worst", str), ("unnotified_worst_fail", bool),
-                                     ("deviation_since", int)):
+                                     ("deviation_since", int), ("cloak", dict)):
         if optional_field in entry and not isinstance(entry[optional_field], expected):
             return True
     return not (isinstance(entry["reason"], str) and isinstance(entry["confirmed_reason"], str))
