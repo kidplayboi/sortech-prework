@@ -29,7 +29,11 @@ Add-Type -AssemblyName System.Windows.Forms
 $MARKER = "SORTECH-ONETAKE"
 $repo   = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $ff     = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.2-full_build\bin\ffmpeg.exe"
-$out    = Join-Path (Split-Path -Parent $repo) "sortech-demo-onetake.mp4"   # 레포 밖에 저장
+# 제출 폴더에 바로 떨어뜨린다 — 촬영 후 파일을 옮기는 단계를 없앤다(옮기다 빠뜨린다).
+# 레포 밖이라 대용량 바이너리가 커밋될 일도 없다.
+$outDir = Join-Path $env:USERPROFILE "Downloads\sortech-제출"
+if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Force -Path $outDir | Out-Null }
+$out    = Join-Path $outDir "실행화면-녹화.mp4"
 if (-not (Test-Path $ff)) { throw "ffmpeg 없음: $ff" }
 
 $Host.UI.RawUI.WindowTitle = $MARKER

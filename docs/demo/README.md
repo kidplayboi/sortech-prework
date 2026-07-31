@@ -10,7 +10,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File docs\demo\run-and-record.ps1
 ```
 
 3분간 그 창을 건드리지 않으면 끝난다. 대본·타이밍·읽을 시간이 전부 스크립트에 있다.
-결과물 = `C:\Users\test\sortech-demo-onetake.mp4` (레포 **밖**에 저장 — 실수 커밋 차단)
+
+결과물은 **제출 폴더에 바로 떨어진다**:
+`~/Downloads/sortech-제출/실행화면-녹화.mp4`
+
+촬영 후 파일을 옮기는 단계를 없앤 것이다(옮기다 빠뜨린다). 레포 밖이라 대용량
+바이너리가 실수로 커밋될 일도 없다. 같은 폴더에 `tools/build_submission.py`가
+만든 S1·S2 pdf가 이미 들어 있으므로, 촬영이 끝나면 **그 폴더째로 첨부**하면 된다.
 
 ## ⚠️ 전제: 깨끗한 데스크톱
 

@@ -4,7 +4,8 @@
 중간 산출물(docx)과 원본(md)은 레포에 남기고, **제출 폴더에는 실제로 보낼 것만** 넣는다.
 
 사용법: python tools/build_submission.py [출력폴더]
-        기본 출력 = 레포 밖 `../sortech-제출/`  (레포에 대용량 바이너리를 쌓지 않는다)
+        기본 출력 = `~/Downloads/sortech-제출/`
+        — 레포에 대용량 바이너리를 쌓지 않고, 메일에 첨부할 때 바로 찾는 자리에 둔다.
 """
 import pathlib
 import shutil
@@ -80,7 +81,8 @@ def collect(out_dir):
 
 
 def main():
-    out = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else REPO.parent / "sortech-제출"
+    out = (pathlib.Path(sys.argv[1]) if len(sys.argv) > 1
+           else pathlib.Path.home() / "Downloads" / "sortech-제출")
     print("[1/3] docx 생성")
     build_docx()
     print("[2/3] pdf 변환")

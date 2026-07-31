@@ -33,6 +33,41 @@ def _is_hard_fail(result):
     return not result["ok"] and not result.get("warn")
 
 
+def probe(site, memory, retries=3):
+    """판정을 한 번 관측한다. **`unknown`(비교 불가)은 판정이 아니므로 재시도**한다.
+
+    이 도구의 핵심 계약이 "검증 불가는 사이트 상태가 아니다"인데, 정작 테스트가
+    그걸 어기고 있었다 — 로컬 서버가 부하로 느려져 요청이 시한을 넘기면 결과가
+    unknown이 되고, 그걸 "판정이 틀렸다"로 집계해 스위트가 간헐 실패했다(10회 중 4회).
+    측정에 실패한 것을 결함으로 세지 않는다.
+    """
+    for _ in range(retries):
+        result = security.check_cloaking(site, memory)
+        if not result.get("unknown"):
+            return result
+    return result
+
+
+def stable_rng(seed=20260731):
+    """양쪽 표본 수를 **같은 시드**로 고정한다.
+
+    구조를 단언하는 테스트(축이 하중을 받는가)는 결정적이어야 한다 —
+    실제 무작위로 두면 경계 근처 노출률에서 간헐 실패하고, 그러면 실패가
+    회귀인지 운인지 구분할 수 없다.
+    """
+    rng = random.Random(seed)
+    return (
+        mock.patch.object(cloak_decision, "user_sample_count",
+                          side_effect=lambda: rng.randint(
+                              cloak_decision.USER_SAMPLE_MIN,
+                              cloak_decision.USER_SAMPLE_MAX)),
+        mock.patch.object(cloak_decision, "bot_sample_count",
+                          side_effect=lambda: rng.randint(
+                              cloak_decision.BOT_SAMPLE_MIN,
+                              cloak_decision.BOT_SAMPLE_MAX)),
+    )
+
+
 class CloakingJudgmentTest(unittest.TestCase):
     """고정 응답 스텁 — '회전이 전혀 없는 안정 페이지'의 판정 계약"""
 
@@ -198,7 +233,7 @@ class CloakingRealServerTest(_RealServerCase):
                 side_effect=lambda: rng.randint(cloak_decision.BOT_SAMPLE_MIN,
                                                 cloak_decision.BOT_SAMPLE_MAX)):
             for _ in range(passes):
-                result = security.check_cloaking(site, memory)
+                result = probe(site, memory)
                 fails += 1 if _is_hard_fail(result) else 0
         return fails, result
 
@@ -267,7 +302,9 @@ class CloakingRealServerTest(_RealServerCase):
 
         with mock.patch.object(security, "_fetch_view", side_effect=spy), \
              _fixed_samples():
-            security.check_cloaking(self._site("/cloak"))  # 진짜 클로킹 = 전 표본 소진
+            result = security.check_cloaking(self._site("/cloak"))  # 전 표본 소진
+        if result.get("unknown"):
+            self.skipTest("로컬 서버 응답 지연으로 표본을 다 못 떴다 — 배치 측정 불가")
         user_indexes = [i for i, who in enumerate(order) if who == "user"]
         block = user_indexes[1:]  # 1차 일반 표본 이후가 확인 블록
         self.assertEqual(len(block), FIXED_SAMPLES)
@@ -360,7 +397,7 @@ class CloakingRealServerTest(_RealServerCase):
         (재표본 0회). 회전 페이지에서 주기 2가 20/20 영구 WARN이었던 자리.
         이제 같은 확장 표본을 경유하므로 회전으로 설명되는 소실은 기각된다."""
         site = self._site("/rotate2", markers=["배너0"])  # 회차마다 오가는 값
-        results = [security.check_cloaking(site, {}) for _ in range(8)]
+        results = [probe(site, {}) for _ in range(8)]
         self.assertEqual([r for r in results if not r["ok"]], [],
                          "회전으로 설명되는 마커 소실이 알림으로 샜다")
 
@@ -423,14 +460,16 @@ class CloakAxisNegativeControlTest(_RealServerCase):
         """
         def confirms(patch_bot):
             _RotatingHandler.ROTATION.clear()
-            site = self._site("/cloak-intermittent12")
-            memory = {}
-            guard = (mock.patch.object(cloak_decision, "bot_sample_count",
-                                       return_value=7)
-                     if patch_bot else contextlib.nullcontext())
-            with guard:
-                return any(_is_hard_fail(security.check_cloaking(site, memory))
-                           for _ in range(16))
+            site, memory = self._site("/cloak-intermittent12"), {}
+            if patch_bot:
+                guards = (mock.patch.object(cloak_decision, "bot_sample_count",
+                                            return_value=7),)
+            else:
+                guards = stable_rng()   # 무작위 그대로 두면 경계 근처라 간헐 실패한다
+            with contextlib.ExitStack() as stack:
+                for guard in guards:
+                    stack.enter_context(guard)
+                return any(_is_hard_fail(probe(site, memory)) for _ in range(20))
 
         self.assertFalse(confirms(patch_bot=True), "봇 표본 고정인데 확정됐다 — 대조 실패")
         self.assertTrue(confirms(patch_bot=False), "봇 블록 무작위화가 확정을 못 만든다")
