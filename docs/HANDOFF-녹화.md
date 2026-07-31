@@ -18,6 +18,34 @@
 
 ---
 
+## 0️⃣ 집에서 이어서 작업하려면 — **푸시가 먼저다**
+
+⚠️**지금 원격은 옛 이력이다.** 푸시하지 않고 집에서 `git clone` 하면 **오늘 작업 49커밋이
+통째로 없는 상태**를 받는다. 순서는 둘 중 하나:
+
+**방법 A (권장) — 이 PC에서 푸시하고, 집에서 clone**
+```powershell
+# 이 PC에서 (1번 참고)
+git push --force origin main
+# 집에서
+git clone https://github.com/kidplayboi/sortech-prework.git
+```
+
+**방법 B — 푸시를 못 하겠으면 번들을 들고 간다**
+
+`C:\Users\test\Downloads\sortech-제출\sortech-prework-현재상태.bundle` (17.6 MB)
+— 이 파일 하나에 커밋 49개 전체가 들어 있다(복원 검증 완료).
+
+```powershell
+# 집에서 (USB나 클라우드로 옮긴 뒤)
+git clone sortech-prework-현재상태.bundle sortech-prework
+cd sortech-prework
+git remote set-url origin https://github.com/kidplayboi/sortech-prework.git
+```
+
+집에서도 `.mask-terms.local`은 없다(git 무시). `tools/extract_log.py`를 쓸 일이 없으면
+상관없고, 쓸 거면 이 PC에서 그 파일도 같이 옮겨야 한다.
+
 ## 1️⃣ 먼저: 원격에 푸시 (형이 직접 실행)
 
 git 이력에 남아 있던 **클라이언트명·봇ID를 로컬에서 전부 치환**했다(감사 결과 0건).
