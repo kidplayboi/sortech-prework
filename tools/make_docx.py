@@ -50,6 +50,41 @@ def split_row(line):
     return [c.strip() for c in line.strip().strip("|").split("|")]
 
 
+def _absorb_continuation(lines, idx, body):
+    """목록 항목에 이어지는 들여쓴 줄들을 같은 항목으로 흡수한다."""
+    while idx < len(lines):
+        nxt = lines[idx]
+        if not nxt.strip() or not nxt.startswith((" ", "\t")):
+            break
+        if re.match(r"^\s*([-*]\s+|\d+\.\s+)", nxt):   # 하위 항목은 별도로 둔다
+            break
+        body.append(nxt.strip())
+        idx += 1
+    return idx
+
+
+def _fix_page_breaks(table):
+    """표가 페이지를 넘어갈 때 읽을 수 있게 만든다.
+
+    기본값이면 ① 머리글이 다음 쪽으로 안 따라와 컬럼 뜻을 알 수 없고
+    ② 행 하나가 쪽 경계에서 반 토막 나 빈 셀이 생긴다.
+    실제 산출물 7쪽에서 둘 다 발생했다 — 기계 검사(넘침·빈 페이지·잔재)는
+    전부 통과했고 **눈으로 봐야** 보였다.
+    """
+    for idx, row in enumerate(table.rows):
+        trPr = row._tr.get_or_add_trPr()
+        if idx == 0:                      # 머리글 행은 쪽마다 반복
+            header = OxmlElement("w:tblHeader")
+            header.set(qn("w:val"), "true")
+            trPr.append(header)
+            # 머리글만 쪽 아래에 혼자 남는 것도 막는다 — 다음 행과 붙여 둔다
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    para.paragraph_format.keep_with_next = True
+        cant_split = OxmlElement("w:cantSplit")   # 행이 쪽 경계에서 쪼개지지 않게
+        trPr.append(cant_split)
+
+
 def add_hrule(doc):
     """빈 문단에 아래 테두리를 넣어 구분선 하나만 그린다."""
     para = doc.add_paragraph()
@@ -132,6 +167,7 @@ def convert(md_path, out_path):
                 for idx, text in enumerate(row[:len(header)]):
                     cells[idx].text = ""
                     add_runs(cells[idx].paragraphs[0], text, base_size=9.5)
+            _fix_page_breaks(table)
             doc.add_paragraph()
             continue
 
@@ -162,19 +198,24 @@ def convert(md_path, out_path):
                 run.font.color.rgb = GRAY
             continue
 
-        # 목록
+        # 목록 — 들여쓴 다음 줄은 **같은 항목의 이어지는 문장**이다.
+        # 별도 문단으로 떨어뜨리면 목록이 중간에 끊겨 보인다(실제 산출물 9쪽에서 발생).
         m = re.match(r"^(\s*)[-*]\s+(.*)", line)
         if m:
-            para = doc.add_paragraph(style="List Bullet")
-            para.paragraph_format.left_indent = Pt(18 + len(m.group(1)) * 6)
-            add_runs(para, m.group(2))
+            indent, body = m.group(1), [m.group(2)]
             i += 1
+            i = _absorb_continuation(lines, i, body)
+            para = doc.add_paragraph(style="List Bullet")
+            para.paragraph_format.left_indent = Pt(18 + len(indent) * 6)
+            add_runs(para, " ".join(body))
             continue
         m = re.match(r"^(\s*)(\d+)\.\s+(.*)", line)
         if m:
-            para = doc.add_paragraph(style="List Number")
-            add_runs(para, m.group(3))
+            body = [m.group(3)]
             i += 1
+            i = _absorb_continuation(lines, i, body)
+            para = doc.add_paragraph(style="List Number")
+            add_runs(para, " ".join(body))
             continue
 
         # 일반 문단 — 마크다운은 **연속 줄을 한 문단으로 합친다.**
