@@ -199,14 +199,23 @@ def _cloak_result(verdict):
     if warns:
         return {"layer": "L5 클로킹", "ok": False, "warn": True,
                 "detail": " · ".join(warns)}
-    if verdict["rejected_spam"] or verdict["rejected_marker"]:
-        # 기각 사유를 "회전"으로 단정하지 않는다 — 사이트 내용에 원래 그 문구가
-        # 있는 경우(카지노 리뷰 사이트 등)와 회차마다 오가는 경우가 같은 관측이다
+    # 기각 사유는 경로별로 다르게 쓴다 — 스팸은 "일반 시점에도 보였다"이고 마커는
+    # "회차마다 오가거나 봇도 본다"다. 한 문장으로 묶으면 마커 쪽이 관측과 반대로
+    # 읽힌다 (20차 P3-4). 기각 사유를 "회전"으로 단정하지도 않는다 — 사이트 내용에
+    # 원래 그 문구가 있는 경우(카지노 리뷰 사이트 등)와 같은 관측이다
+    notes = []
+    if verdict["rejected_spam"]:
+        notes.append("일반 시점에도 보이는 문구(클로킹 아님): %s"
+                     % _show(verdict["rejected_spam"]))
+    if verdict["rejected_marker"]:
+        notes.append("마커가 시점마다 오감(봇 차단 아님): %s"
+                     % _show(verdict["rejected_marker"]))
+    if notes:
         return {"layer": "L5 클로킹", "ok": True,
-                "detail": "일반 시점에서도 확인됨 — 클로킹 아님(일반 %d회 중: %s)"
-                          % (verdict["user_seen"],
-                             _show(verdict["rejected_spam"] + verdict["rejected_marker"]))}
-    return {"layer": "L5 클로킹", "ok": True, "detail": "일반/검색봇 시점 일치"}
+                "detail": "%s · 일반 %d회 관측" % (" · ".join(notes), verdict["user_seen"])}
+    # "일치"라고 단정하지 않는다 — 이번 표본에서 갈리는 게 없었다는 뜻일 뿐이고,
+    # 노출률이 낮은 클로커는 후보 자체가 안 잡힐 수 있다(탐지 하한, 20차 P2-1)
+    return {"layer": "L5 클로킹", "ok": True, "detail": "표본 범위에서 이상 없음"}
 
 
 def _spam_detail(verdict):
@@ -277,14 +286,19 @@ def check_reputation(site):
         matches = (resp.json() or {}).get("matches") or []
     except (json.JSONDecodeError, ValueError):
         return _unknown_rep("조회 응답 형식 이상")
+    # 응답 형태를 신뢰하면 벤더가 스키마를 바꾸는 날 예외가 층 밖으로 새고, cli가
+    # 그걸 "체크 자체 실패" 🔴로 만들어 **사이트 장애로 오귀속**한다 (19차 P3-5).
+    # ⚠️20차 P2-3: 그때 루트 타입 하나만 막았는데 형제가 5개 더 있었다 — 항목이
+    # dict가 아닌 경우·threatType이 null/list/숫자인 경우 전부 join·set에서 터진다.
+    # 게다가 `{"matches": ["MALWARE"]}`는 예외 없이 단정형 🔴 "등재: UNKNOWN"을 냈다
+    # (검증 불가여야 할 것이 거짓 적색 경보가 된다). 증상이 아니라 클래스를 막는다
     if not isinstance(matches, list):
-        # 응답 형태를 신뢰하면 벤더가 스키마를 바꾸는 날 예외가 층 밖으로 새고,
-        # cli가 그걸 "체크 자체 실패" 🔴로 만들어 **사이트 장애로 오귀속**한다
-        # (19차 P3-5). 우리 확인 실패는 unknown이지 사이트 상태가 아니다
         return _unknown_rep("조회 응답 형식 이상")
     if matches:
-        kinds = sorted({m.get("threatType", "UNKNOWN") if isinstance(m, dict)
-                        else "UNKNOWN" for m in matches})
+        kinds = sorted({m["threatType"] for m in matches
+                        if isinstance(m, dict) and isinstance(m.get("threatType"), str)})
+        if not kinds:
+            return _unknown_rep("조회 응답 형식 이상(위협 항목 해석 불가)")
         return {"layer": "L5 평판", "ok": False,
                 "detail": "Google 위험 사이트 등재: %s — 방문자에게 경고 화면이 뜨는 상태"
                           % ", ".join(kinds)}
@@ -319,8 +333,8 @@ def _keywords(site):
     """내장 시그니처 + 사이트별 추가. **중복 제거 필수** (18차 P2-2).
 
     설정에 내장 키워드와 같은 값이 들어오면(정상 통과하는 설정이다) 같은 문구가
-    두 번 순회돼 한 패스에 누적이 2씩 올라가고, 확정 임계 4가 조용히 2패스로
-    반토막 난다 — 13~17차 오탐 클래스가 설정 파일 하나로 재개방되는 경로다.
+    두 번 순회돼 한 패스에 누적이 2씩 올라가고, 확정 임계가 조용히 반토막 난다 —
+    13~17차 오탐 클래스가 설정 파일 하나로 재개방되는 경로다.
     """
     extra = [k for k in (site.get("spam_keywords") or [])
              if isinstance(k, str) and k.strip()]

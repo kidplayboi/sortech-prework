@@ -9,6 +9,7 @@
 - 각 축을 뜯었을 때 오탐이 되살아나는지도 함께 단언한다. 되살아나지 않으면 그
   축은 장식이고, 테스트는 커버리지 0이다 (17차 오답 24호).
 """
+import contextlib
 import random
 import socketserver
 import threading
@@ -94,7 +95,7 @@ class CloakingJudgmentTest(unittest.TestCase):
             result = security.check_cloaking(
                 {"url": "http://a.b", "markers": ["데모샵"], "timeout_sec": 5})
         self.assertTrue(result["ok"], result["detail"])
-        self.assertIn("클로킹 아님", result["detail"])
+        self.assertIn("일반 시점에도 보이는 문구", result["detail"])
         self.assertEqual(len(calls), 3)  # 조기 종료 — 확인 블록을 다 뜨지 않는다
 
     def test_repeated_spam_is_confirmed_fail(self):
@@ -214,17 +215,31 @@ class CloakingRealServerTest(_RealServerCase):
             fails, _last = self._sweep(path)
             self.assertEqual(fails, 0, "%s 하드 FAIL %d회" % (path, fails))
 
-    def test_rotation_verdict_does_not_depend_on_one_lucky_seed(self):
-        """19차 P2-2 — 위 단언은 시드 하나의 관측치다. 시드를 바꾸면 무너지는
-        '구조적 보장'이 되지 않도록 여러 시드에서 같은 결론을 확인한다.
-        (수리 전 코드에서는 18개 시드 중 4개가 이 스윕을 RED로 만들었다)"""
-        for seed in (17, 42, 4242, 46423, 71420):
-            for path in ("/rotate14", "/rotate15", "/rotate16", "/rotate17",
-                         "/rotate24"):
+    # 취약 주기 × 시드 스윕에서 **실측된 잔존 오탐 상한**. 0이 아니다 —
+    # 20차 P1-1: "0/1206"이라고 쓴 근거는 시작 위상 0·시드 하나의 관측치였고,
+    # 시드를 흔들면 주기 16에서 재현된다(시드 12개 × 경로 5 × 12패스 = 720패스에서
+    # 5회, 0.69%). 회귀는 그 사실을 **숨기지 말고 상한으로** 지킨다 —
+    # 여유 3배(2%)를 두되, 이 값을 넘으면 뭔가 나빠진 것이다
+    RESIDUAL_MAX_RATE = 0.02
+
+    def test_rotation_false_positive_stays_under_measured_bound(self):
+        """19차 P2-2 · 20차 P1-1 — 위 단언은 시드 하나의 관측치다.
+
+        시드를 바꾸면 무너지는 '구조적 보장'을 주장하지 않는다. 대신 여러 시드에서
+        **잔존율이 실측 상한 아래인지**를 지킨다. 확률적 장치의 정직한 회귀 형태다.
+        (수리 전 코드에서는 같은 스윕이 훨씬 높았다 — 감사 문서 §20차 참조)
+        """
+        paths = ("/rotate14", "/rotate15", "/rotate16", "/rotate17", "/rotate24")
+        seeds, passes = range(12), 12
+        fails = 0
+        for seed in seeds:
+            for path in paths:
                 _RotatingHandler.ROTATION.clear()
-                fails, _last = self._sweep(path, passes=8, seed=seed)
-                self.assertEqual(fails, 0, "seed=%d %s 하드 FAIL %d회"
-                                 % (seed, path, fails))
+                hits, _last = self._sweep(path, passes=passes, seed=seed)
+                fails += hits
+        total = len(list(seeds)) * len(paths) * passes
+        self.assertLessEqual(fails / total, self.RESIDUAL_MAX_RATE,
+                             "잔존 오탐 %d/%d — 실측 상한 초과" % (fails, total))
 
     def test_short_period_rotation_is_resolved_within_one_pass(self):
         """주기가 확인 블록 하한 이하면 한 패스에서 기각된다 — 누적을 기다리지
@@ -297,23 +312,22 @@ class CloakingRealServerTest(_RealServerCase):
             self.assertEqual([v for v in verdicts if v["ok"]], [],
                              "%s: 침해된 사이트에 단정형 🟢" % path)
 
-    def test_detection_floor_is_where_the_model_says_it_is(self):
-        """탐지 하한을 **테스트로 박아둔다** — 숨기면 다음 라운드에 "미탐 발견"으로
-        돌아온다. 확정은 순증 누적이라 패스당 후보 관측 확률이 1/2를 넘어야 위로
-        드리프트한다. 봇 표본 B회, 노출률 r이면 조건은 `1-(1-r)^B > 1/2`.
-        B=5~12이므로 하한은 r ≈ 1/12 — 1/6은 확정되고 1/20은 안 된다.
-        (하한을 낮추려면 봇 표본을 늘려야 하고 그건 남의 사이트 부담이다)
-        """
-        _RotatingHandler.ROTATION.clear()
-        above, memory = self._site("/cloak-intermittent6"), {}
-        verdicts = [security.check_cloaking(above, memory) for _ in range(12)]
-        self.assertTrue(any(_is_hard_fail(v) for v in verdicts), "1/6은 확정돼야 한다")
+    def test_detection_floor_is_where_the_measurement_says_it_is(self):
+        """탐지 하한을 **경계 근처에서** 테스트로 박아둔다.
 
-        _RotatingHandler.ROTATION.clear()
-        below, memory = self._site("/cloak-intermittent20"), {}
-        verdicts = [security.check_cloaking(below, memory) for _ in range(12)]
-        self.assertFalse(any(_is_hard_fail(v) for v in verdicts),
-                         "1/20이 확정된다면 하한 모델이 틀린 것 — 문서를 고쳐야 한다")
+        20차 P3-5: 처음엔 1/6과 1/20만 단언해서 실측 경계(1/13~1/14)에서 양쪽 다
+        멀었다 — 모델이 30% 틀려도 GREEN이었다. 경계 바로 아래위를 잡는다.
+        (하한을 낮추려면 봇 표본을 늘려야 하고 그건 감시 대상 사이트의 부담이다)
+        """
+        def confirmed(path, passes=20):
+            _RotatingHandler.ROTATION.clear()
+            site, memory = self._site(path), {}
+            return any(_is_hard_fail(security.check_cloaking(site, memory))
+                       for _ in range(passes))
+
+        self.assertTrue(confirmed("/cloak-intermittent12"), "1/12는 확정돼야 한다")
+        self.assertFalse(confirmed("/cloak-intermittent16"),
+                         "1/16이 확정된다면 하한이 바뀐 것 — 문서 수치를 고쳐야 한다")
 
     def test_intermittent_cloaking_never_reports_recovery(self):
         """간헐 클로커에서 🔴→🟢→🔴 플랩이 나면 알림 신뢰가 무너진다.
@@ -398,6 +412,28 @@ class CloakAxisNegativeControlTest(_RealServerCase):
             self.assertEqual(self._hard_fails(passes=1), 1)
         _RotatingHandler.ROTATION.clear()
         self.assertEqual(self._hard_fails(passes=1), 0)
+
+    def test_axis3_on_the_bot_block_is_load_bearing(self):
+        """20차 P2-2 — 19차의 헤드라인 수리(봇 블록 무작위화)를 통째로 되돌려도
+        스위트가 전부 GREEN이었다. 내 규율("결함 코드에서 RED를 먼저 봐라")을
+        정작 그 수리에는 적용하지 않은 것. 인과를 짝으로 단언한다.
+
+        봇 표본을 7로 고정하면 봇 시점 위상이 매 패스 정확히 7씩만 움직여, 노출
+        주기가 12 이상인 클로커는 봇 표본이 스팸 회차를 영원히 못 밟는다.
+        """
+        def confirms(patch_bot):
+            _RotatingHandler.ROTATION.clear()
+            site = self._site("/cloak-intermittent12")
+            memory = {}
+            guard = (mock.patch.object(cloak_decision, "bot_sample_count",
+                                       return_value=7)
+                     if patch_bot else contextlib.nullcontext())
+            with guard:
+                return any(_is_hard_fail(security.check_cloaking(site, memory))
+                           for _ in range(16))
+
+        self.assertFalse(confirms(patch_bot=True), "봇 표본 고정인데 확정됐다 — 대조 실패")
+        self.assertTrue(confirms(patch_bot=False), "봇 블록 무작위화가 확정을 못 만든다")
 
     def test_axis3_removed_locks_phase_and_accumulates_to_confirm(self):
         """축 3 제거 = 패스 길이 고정 → 위상 락 → 축 2의 누적이 그대로 차서 확정.
