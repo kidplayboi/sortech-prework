@@ -13,3 +13,6 @@ board.html.tmp
 board_history.json
 board_history.json.tmp
 !.env.example
+
+# 타 프로젝트·클라이언트 식별어 목록 — 레포에 두지 않는다(가리려는 대상을 가리개에 적지 않는다)
+.mask-terms.local

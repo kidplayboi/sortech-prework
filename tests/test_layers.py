@@ -308,12 +308,39 @@ class DeployModeTest(unittest.TestCase):
         self.assertEqual(sent, [])  # 전송 전부 실패 — 콘솔로만 보고
 
 
+def _playwright_ready():
+    """Playwright 패키지 + Chromium 브라우저가 **둘 다** 있는가.
+
+    L4는 선택 기능이라 기본 설치(`requirements.txt`)에 브라우저가 없다.
+    그 환경에서 이 테스트들이 **실패**하면 "이 도구가 고장났다"로 읽힌다 —
+    실제로는 선택 의존성이 없을 뿐이다. 검증 불가를 성공으로 위장하지도 않고
+    실패로 오귀속하지도 않는다: **정직하게 skip**하고 이유를 남긴다.
+    (이 도구가 unknown을 사이트 장애와 구분하는 것과 같은 원칙이다)
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return False, "playwright 미설치 — `pip install -r requirements-dev.txt`"
+    try:
+        with sync_playwright() as p:
+            p.chromium.launch(headless=True).close()
+    except Exception as exc:                      # 브라우저 바이너리 없음 등
+        return False, "Chromium 실행 불가(%s) — `playwright install chromium`" % type(exc).__name__
+    return True, ""
+
+
 class RenderLayerTest(unittest.TestCase):
     """L4 — 실제 헤드리스 렌더 경로 검증 (D2 슬라이스 ①). SETTLE_MS는 테스트에서
-    단축 — 로컬 정적 페이지는 load 직후 렌더가 끝난다."""
+    단축 — 로컬 정적 페이지는 load 직후 렌더가 끝난다.
+
+    ⚠️선택 의존성(Playwright + Chromium)이 없으면 **skip**한다. 기본 설치만 한
+    사람이 빨간 실패를 보고 도구가 고장난 줄 알면 안 된다."""
 
     @classmethod
     def setUpClass(cls):
+        ready, why = _playwright_ready()
+        if not ready:
+            raise unittest.SkipTest("L4 선택 의존성 없음 — %s" % why)
         cls.server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _DemoHandler)
         cls.server.daemon_threads = True
         cls.port = cls.server.server_address[1]

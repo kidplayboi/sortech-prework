@@ -1,0 +1,14 @@
+# 선택 기능용 의존성 — 기본 설치(requirements.txt)에는 넣지 않는다.
+#
+# 왜 나눴나: 기본 설치만 한 사람이 L4(렌더링 검증) 테스트 실패를 보고
+# "도구가 고장났다"고 읽는 걸 막기 위해서다. 없으면 해당 테스트는 실패가 아니라
+# **skip**되고 이유가 출력된다.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+#   playwright install chromium        # 브라우저 바이너리는 별도 내려받기
+#
+# 이걸 설치해야 쓸 수 있는 것: L4 렌더링 검증(`sites.json`의 `render: true`)
+
+-r requirements.txt
+
+playwright>=1.40

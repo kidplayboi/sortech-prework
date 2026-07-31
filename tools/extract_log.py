@@ -1,7 +1,12 @@
-"""세션 트랜스크립트에서 **날것 대화**를 뽑아 공개 가능한 형태로 만든다.
+"""세션 트랜스크립트에서 대화 기록을 뽑아 공개 가능한 형태로 만든다.
 
 왜 필요한가: 과제 요구사항이 AI 활용 기록에 대해 "날것 그대로 환영"인데,
 `docs/ai-log`는 전부 사후 요약체다. 요약은 내가 고른 것만 남으므로 증거가 아니다.
+
+⚠️이 도구가 뽑는 것의 한계 — 트랜스크립트의 **user 역할 메시지**를 기계 추출한
+것이다. 시스템이 자동 삽입하는 블록(리마인더·스킬 지침·컴팩션 요약·툴 결과)을
+걷어내지만, 그렇게 걸러낸 결과가 "사람이 직접 친 말만"이라고 단정하지 않는다.
+사람이 친 말임을 확인한 것은 제출 문서에 직접 인용한 왕복들뿐이다.
 
 안전 설계 (이 레포는 공개다):
 - 트랜스크립트 한 폴더에 **전 프로젝트가 섞여 있다.** 그래서 레코드마다 `cwd`를
@@ -16,6 +21,7 @@
 """
 import argparse
 import json
+import os
 import pathlib
 import re
 import sys
@@ -28,9 +34,11 @@ OUT_DIR = pathlib.Path(__file__).resolve().parent.parent / "docs" / "ai-log" / "
 # 순서 중요: 넓은 패턴이 먼저 먹으면 좁은 패턴이 안 걸린다
 PATTERNS = [
     # ⚠️env 대입 형태를 **가장 먼저** 지운다. 값의 모양을 보고 거르면 늦는다 —
-    #   실제로 `${1}=<마스킹> 처럼 값이 잘려 적힌 줄이 있었고,
+    #   실제로 `TELEGRAM_BOT_TOKEN=<봇ID>:AAE…` 처럼 값이 잘려 적힌 줄이 있었고,
     #   콜론 뒤 30자를 요구하던 토큰 패턴을 그대로 통과했다. 챗 ID는 통째로 남았다.
     #   교훈: 시크릿은 '값의 생김새'가 아니라 **'이름'으로도 지워야 한다.
+    #   ⚠️2차 교훈: 이 주석에 그때의 실제 값을 그대로 옮겨 적었었다 — **사고를
+    #   기록하다가 같은 값을 다시 유출했다.** 재현 예시는 반드시 자리표시자로 쓴다.
     (re.compile(r"(?i)\b([A-Z0-9_]*(TOKEN|SECRET|PASSWORD|PASSWD|APIKEY|API_KEY|"
                 r"CHAT_ID|CLIENT_ID|CLIENT_SECRET|ACCESS_KEY|PRIVATE_KEY)[A-Z0-9_]*)"
                 r"\s*[=:]\s*\S+"), r"\1=<마스킹>"),
@@ -44,18 +52,31 @@ PATTERNS = [
     (re.compile(r"/c/Users/[^/\s\"']+"), "/c/Users/<user>"),
 ]
 
-# 타 프로젝트·클라이언트 식별어 — 공개 레포 가드의 핵심.
-# 한 글자라도 새면 무관한 회사·개인 정보가 제출물에 들어간다.
-OTHER_PROJECTS = [
-    "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>-saas", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>",
-    "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>",
-    "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>",
-    "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "Nexus", "<타-프로젝트-마스킹>",
-    "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>",
-    "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>",
-    "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>", "<타-프로젝트-마스킹>",
-]
-OTHER_RE = re.compile("|".join(re.escape(w) for w in OTHER_PROJECTS), re.IGNORECASE)
+# 타 프로젝트·클라이언트 식별어 목록은 **이 레포에 두지 않는다.**
+#
+# ⚠️여기에 40여 개를 평문으로 열거했었다 — 무관한 회사 정보가 제출물에 새는 걸
+#   막으려는 장치가 **그 자체로 공개 레포에 그 정보를 박아 넣은** 상태였다.
+#   가리려는 대상을 가리개에 적으면 안 된다.
+#
+# 목록은 로컬 파일에서 읽는다(기본 `.mask-terms.local`, git 무시). 파일이 없으면
+# 그 마스킹은 동작하지 않으며, **조용히 넘어가지 않고** 감사 단계가 경고한다 —
+# 없는 걸 모른 채 산출물을 커밋하는 게 제일 나쁘다.
+TERMS_FILE = pathlib.Path(
+    os.environ.get("MASK_TERMS_FILE")
+    or (pathlib.Path(__file__).resolve().parent.parent / ".mask-terms.local"))
+
+
+def _load_terms():
+    if not TERMS_FILE.exists():
+        return []
+    return [line.strip() for line in
+            TERMS_FILE.read_text(encoding="utf-8-sig").splitlines()
+            if line.strip() and not line.startswith("#")]
+
+
+OTHER_PROJECTS = _load_terms()
+OTHER_RE = (re.compile("|".join(re.escape(w) for w in OTHER_PROJECTS), re.IGNORECASE)
+            if OTHER_PROJECTS else None)
 
 # 감사 단계에서 다시 훑을 위험 신호 (마스킹 후에도 남았으면 사람이 봐야 한다)
 AUDIT_SIGNS = [
@@ -65,7 +86,6 @@ AUDIT_SIGNS = [
     (re.compile(r"\b(?=[A-Za-z0-9_-]{32,}\b)(?=[^\s]*[a-z])(?=[^\s]*[A-Z])"
                 r"(?=[^\s]*\d)[A-Za-z0-9_-]{32,}\b"), "고엔트로피 문자열(키 가능성)"),
     (re.compile(r"\b\d{8,}\b"), "8자리 이상 숫자(봇·챗 ID 가능성)"),
-    (OTHER_RE, "타 프로젝트 식별어"),
     (re.compile(r"C:\\Users\\(?!<user>)"), "마스킹 안 된 사용자 경로"),
     # 값이 실제로 붙어 있을 때만 문다. `TOKEN=` 처럼 규칙을 **설명하는** 문장까지
     # 걸면(내 문서가 실제로 걸렸다) 오탐이 쌓이고, 오탐이 쌓인 감사는 무시된다.
@@ -77,6 +97,8 @@ AUDIT_SIGNS = [
 def mask(text):
     for pattern, repl in PATTERNS:
         text = pattern.sub(repl, text)
+    if OTHER_RE is None:
+        return text          # 목록 없음 — 감사 단계가 경고한다
     return OTHER_RE.sub("<타-프로젝트-마스킹>", text)
 
 
@@ -144,17 +166,23 @@ def cmd_prompts():
     kept = [(ts, mask(body)) for ts, body in turns]
     short = 0
     with out.open("w", encoding="utf-8") as fh:
-        fh.write("# 지시 전문 (날것) — 소르테크 사전 과제\n\n")
-        fh.write("> 세션 트랜스크립트에서 **사람이 실제로 친 말**만 시간순으로 뽑았다.\n")
-        fh.write("> 요약·각색 없음. 마스킹만 적용(토큰·키·경로·타 프로젝트 식별어).\n")
+        fh.write("# 지시 기록 — 소르테크 사전 과제\n\n")
+        fh.write("> 세션 트랜스크립트의 **user 역할 메시지**를 시간순으로 기계 추출했다.\n")
+        fh.write("> 시스템이 자동 삽입하는 블록(리마인더·스킬 지침·컴팩션 요약·툴 결과)은\n")
+        fh.write("> 걷어냈지만, 남은 것이 **사람이 직접 친 말만이라고 단정하지 않는다.**\n")
+        fh.write("> 사람이 친 말임을 확인한 왕복은 제출 문서(S1 §2)에 직접 인용했다.\n")
+        fh.write("> 마스킹 적용(토큰·키·경로·무관 프로젝트 식별어).\n")
         fh.write("> 추출기 = `tools/extract_log.py` · 필터 = 레코드의 `cwd`가 이 레포인 것만\n\n")
-        fh.write("총 %d턴 (3자 미만 응답 %d턴은 제외)\n\n---\n\n" % (len(kept), short))
+        fh.write("총 %d턴\n\n---\n\n" % len(kept))
         day = None
         for ts, body in kept:
             if ts[:10] != day:
                 day = ts[:10]
                 fh.write("\n## %s\n\n" % day)
-            fh.write("**%s**\n> %s\n\n" % (ts[11:16], body.replace("\n", "\n> ")))
+            # 인용 접두를 붙일 때 빈 줄에 `> `가 남으면 trailing whitespace가 된다
+            # (git diff --check가 잡는다). 줄마다 오른쪽 공백을 털어낸다.
+            quoted = "\n".join(("> " + ln).rstrip() for ln in body.splitlines())
+            fh.write("**%s**\n%s\n\n" % (ts[11:16], quoted))
     print("작성: %s (%d턴)" % (out, len(kept)))
     return out
 
@@ -163,7 +191,16 @@ def cmd_audit(target):
     path = pathlib.Path(target)
     text = path.read_text(encoding="utf-8")
     total = 0
-    for pattern, label in AUDIT_SIGNS:
+    signs = list(AUDIT_SIGNS)
+    if OTHER_RE is not None:
+        signs.append((OTHER_RE, "타 프로젝트 식별어"))
+    else:
+        # 목록이 없다는 사실을 조용히 넘기지 않는다 — 마스킹이 한 축 통째로
+        # 꺼진 상태이고, 그걸 모른 채 커밋하는 게 제일 위험하다
+        print("  ⚠️ 식별어 목록 없음(%s) — 타 프로젝트 마스킹 미적용. "
+              "산출물을 사람이 직접 훑을 것" % TERMS_FILE.name)
+        total += 1
+    for pattern, label in signs:
         hits = pattern.findall(text)
         if hits:
             uniq = sorted(set(h if isinstance(h, str) else h[0] for h in hits))[:6]

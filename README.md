@@ -84,11 +84,36 @@ curl -s -A "Googlebot/2.1" http://127.0.0.1:8899     | grep 바카라   # 나옴
 - 통보 전에 스스로 복구된 순단은 버리지 않고 "이전 순단 사후 보고"로 1회 전달 (이탈 구간의 최악 사유 인용)
 - 잘못 설정된 사이트는 경고 후 제외하고 나머지는 계속 감시 (가용성 우선)
 
-## 테스트
+## 설치와 테스트
+
+**기본 설치** — L1~L3(핵심)만 쓰는 경우. 이것만으로 테스트가 전부 통과한다.
 
 ```bash
-python -m unittest discover -s tests   # 97개 — 외부 AI 교차 게이트의 회귀 고정
+pip install -r requirements.txt
+python -m unittest discover -s tests   # → Ran 98 tests ... OK (skipped=1)
 ```
+
+L4 렌더 테스트는 이 환경에서 건너뛴다.
+
+**기본 설치 상태에서 `status`를 돌리면 🟠가 뜬다 — 정상이다.** 동봉된 `sites.json`이
+L4(렌더링)와 L5(보안)까지 켜둔 데모 설정이라, 브라우저가 없으면 그 층이 "검증 불가"로
+보고된다. 사이트가 이상한 게 아니라 **우리가 확인을 못 한 것**이고, 메시지에 이유와
+해제 명령이 같이 나온다. 🟢로 보려면 둘 중 하나:
+
+- 전체 설치를 하거나(아래), 또는
+- `sites.json`에서 `"render": true` / `"security": true`를 빼면 **핵심 3층(L1~L3)만** 돈다
+
+**전체 설치** — L4 렌더링 검증까지 쓰려면 선택 의존성이 필요하다.
+
+```bash
+pip install -r requirements-dev.txt
+python -m playwright install chromium
+python -m unittest discover -s tests   # → Ran 101 tests ... OK
+```
+
+L4 의존성이 없으면 해당 테스트는 **실패가 아니라 skip**되고 이유가 출력된다.
+검증하지 못한 것을 성공으로 위장하지 않고, 선택 기능 미설치를 고장으로 오귀속하지도 않는다 —
+이 도구가 "검증 불가"와 "사이트 장애"를 구분하는 것과 같은 원칙이다.
 
 ## 알려진 한계 (정직하게)
 
