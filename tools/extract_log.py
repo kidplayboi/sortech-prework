@@ -67,8 +67,10 @@ AUDIT_SIGNS = [
     (re.compile(r"\b\d{8,}\b"), "8자리 이상 숫자(봇·챗 ID 가능성)"),
     (OTHER_RE, "타 프로젝트 식별어"),
     (re.compile(r"C:\\Users\\(?!<user>)"), "마스킹 안 된 사용자 경로"),
-    (re.compile(r"(?i)(token|secret|password|api[_-]?key|chat_id)\s*[=:]\s*[^<\s]"),
-     "마스킹 안 된 시크릿 대입"),
+    # 값이 실제로 붙어 있을 때만 문다. `TOKEN=` 처럼 규칙을 **설명하는** 문장까지
+    # 걸면(내 문서가 실제로 걸렸다) 오탐이 쌓이고, 오탐이 쌓인 감사는 무시된다.
+    (re.compile(r"(?i)(token|secret|password|api[_-]?key|chat_id)\s*[=:]\s*"
+                r"[^\s<`'\"]{6,}"), "마스킹 안 된 시크릿 대입"),
 ]
 
 
