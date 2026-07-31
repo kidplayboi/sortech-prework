@@ -123,12 +123,22 @@ class _RotatingHandler(http.server.BaseHTTPRequestHandler):
     # 가장 자연스러운 모양이고, 이게 판정을 실제로 깨는 조건이다
     SPAM_RESIDUES = {"/rotate5": {1, 2, 4}, "/rotate6": {1, 2, 4},
                      "/rotate7": {1, 2, 4}, "/rotate8": {1, 5},
-                     "/rotate12": {1, 5, 9}}
+                     "/rotate12": {1, 5, 9}, "/rotate24": {1, 18},
+                     # 회전 밀도가 높아(7/13) **봇 블록이 과반을 채우는데** 그 사이
+                     # 일반 블록(잔여류 2~6)은 깨끗한 페이지. 즉시 확정의 두 자물쇠
+                     # 중 '봇 과반'이 무력해지고 **회전 감지만 남는** 유일한 조건이라,
+                     # 축 1 단독 음성 대조가 성립하는 자리다 (18차 P3-5)
+                     "/rotate13dense": {1, 7, 8, 9, 10, 11, 12}}
+    # 18차 P3-3: escalation 확률의 최대점은 **스팸 잔여류 간격 = 일반 표본 상한+1**
+    # (그 간격이면 확인 블록이 잔여류를 절대 못 덮는다). 상한 16 기준 최악은 주기 17과
+    # 간격 17짜리 조합(주기 24의 {1,18})이라 그 둘을 픽스처에 넣는다 — 16에서 끊으면
+    # 회귀가 최악 지점 **직전**까지만 덮는다
     PERIODS = {"/rotate2": 2, "/rotate3": 3, "/rotate4": 4, "/rotate5": 5,
                "/rotate6": 6, "/rotate7": 7, "/rotate8": 8, "/rotate9": 9,
                "/rotate10": 10, "/rotate11": 11, "/rotate12": 12,
                "/rotate12single": 12, "/rotate13": 13, "/rotate14": 14,
-               "/rotate15": 15, "/rotate16": 16}
+               "/rotate15": 15, "/rotate16": 16, "/rotate17": 17, "/rotate24": 24,
+               "/rotate13dense": 13}
 
     def do_GET(self):
         path = self.path.split("?")[0]
@@ -136,16 +146,20 @@ class _RotatingHandler(http.server.BaseHTTPRequestHandler):
         is_bot = "googlebot" in ua
         if path == "/cloak":
             body = "데모샵 장바구니" + (" %s 카지노" % self.SPAM if is_bot else "")
-        elif path == "/cloak-intermittent":
-            # 진짜 클로커인데 봇에게 간헐 노출(봇 요청 2회 중 1회) — 미탐 위험 측정용.
+        elif path.startswith("/cloak-intermittent"):
+            # 진짜 클로커인데 봇에게 **간헐 노출** — 미탐 위험 측정용.
             # 카운터를 봇 요청만 세도록 분리한다 — 공용 카운터로 세면 일반 요청이
-            # 위상을 밀어 봇이 스팸을 한 번도 안 보이는 조합이 생긴다(첫 시도의 함정)
+            # 위상을 밀어 봇이 스팸을 한 번도 안 보이는 조합이 생긴다(첫 시도의 함정).
+            # ⚠️18차 P1-1: 노출률 1/2 하나만 픽스처로 두는 바람에, 1/3·1/4 클로커가
+            #   구조적으로 확정 불가가 된 회귀를 스위트가 통째로 놓쳤다. 노출률을
+            #   경로에 실어 1/2·1/3·1/4를 전부 고정한다 (`/cloak-intermittent3` 등)
             key = path + ":bot"
+            every = int(path[len("/cloak-intermittent"):] or 2)
             body = "데모샵 장바구니"
             if is_bot:
                 index = self.ROTATION.get(key, 0)
                 self.ROTATION[key] = index + 1
-                if index % 2 == 0:
+                if index % every == 0:
                     body += " %s 카지노" % self.SPAM
         else:
             period = self.PERIODS.get(path, 2)

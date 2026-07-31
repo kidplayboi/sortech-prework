@@ -284,3 +284,18 @@ class BadStateFileTest(unittest.TestCase):
         st = {"s": {"observed": "FAIL"}}
         obs = state_mod.observe(st, "s", "FAIL", "r", confirm=1)
         self.assertTrue(obs["alert"])
+
+    def test_corrupt_cloak_bucket_does_not_block_alerts(self):
+        """18차 P2-1: cloak 중첩 버킷이 dict가 아니면 write_cloak가 TypeError를 내고,
+        그게 알림 디스패치보다 앞이라 그 사이트가 **영구 무알림**이 된다 —
+        다운된 사이트인데 알림 0건. `_entry_broken`은 바깥 dict만 보므로 통과한다.
+        예외 없이 넘어가고, 손상 키는 다시 쓰지 않아 자가 치유돼야 한다."""
+        st = {"s": {"cloak": {"spam": 5}}}
+        state_mod.write_cloak(st, "s", state_mod.read_cloak(st, "s"))
+        self.assertNotIn("cloak", st["s"])
+
+    def test_healthy_cloak_bucket_survives_a_round_trip(self):
+        """치유가 멀쩡한 누적까지 지우면 축 2가 매 패스 초기화된다 (음성 대조)"""
+        st = {"s": {"cloak": {"spam": {"바카라": 2}}}}
+        state_mod.write_cloak(st, "s", state_mod.read_cloak(st, "s"))
+        self.assertEqual(st["s"]["cloak"], {"spam": {"바카라": 2}})

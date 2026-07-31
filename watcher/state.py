@@ -153,9 +153,19 @@ def read_cloak(state, site_key):
 def write_cloak(state, site_key, memory):
     """누적 기억을 보존한다. **observe() 뒤에 호출해야 한다** — 스키마가 깨진
     엔트리는 observe가 통째로 재초기화하므로 그 전에 쓰면 지워진다.
-    빈 기억은 저장하지 않는다(state.json에 죽은 키를 남기지 않음)."""
+    빈 기억은 저장하지 않는다(state.json에 죽은 키를 남기지 않음).
+
+    ⚠️중첩 버킷 타입을 여기서 방어한다 (18차 P2-1). `_entry_broken`은 cloak가
+    dict인지만 보므로 `{"spam": 5}` 같은 손상은 통과하고, 그대로 순회하면
+    TypeError가 난다. 이 함수는 **알림 발송보다 앞**에서 호출되므로 그 예외 하나가
+    해당 사이트를 매 패스 영구 무알림으로 만든다(다운된 사이트인데 알림 0건).
+    형태가 이상한 버킷은 버리고 다시 쓰지 않는다 = 다음 패스에 자가 치유."""
     entry = state.setdefault(site_key, {})
-    live = {kind: dict(bucket) for kind, bucket in (memory or {}).items() if bucket}
+    live = {kind: {k: v for k, v in bucket.items()
+                   if isinstance(k, str) and isinstance(v, int)
+                   and not isinstance(v, bool) and v > 0}
+            for kind, bucket in (memory or {}).items() if isinstance(bucket, dict)}
+    live = {kind: bucket for kind, bucket in live.items() if bucket}
     if live:
         entry["cloak"] = live
     else:

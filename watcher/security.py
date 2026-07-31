@@ -63,6 +63,8 @@ def check_cloaking(site, memory=None):
     """
     timeout = site.get("timeout_sec", 10)
     store = memory if isinstance(memory, dict) else {}
+    working = cloak_decision.load_memory(store)
+    keywords, markers = _keywords(site), _markers(site)
     try:
         user_first, user_note = _fetch_view(site["url"], timeout)
         bot_first, bot_note = _fetch_view(site["url"], timeout, ua=BOT_UA,
@@ -74,23 +76,52 @@ def check_cloaking(site, memory=None):
     if user_note or bot_note:
         return _unknown_cloak(user_note or bot_note)
 
-    spam = [k for k in _keywords(site) if k in bot_first and k not in user_first]
-    lost = [m for m in (site.get("markers") or [])
-            if m in user_first and m not in bot_first]
     user_texts, bot_texts = [user_first], [bot_first]
-    if spam or lost:
+    # 확장 조건 = 이번 1차 표본이 후보를 물었거나, **이미 추적 중인 후보가 있거나**.
+    # 후자가 18차 P1-1 수리다: 후보를 봇 1차 표본에서만 뽑으면 봇에게 1/2 미만으로
+    # 노출하는 클로커는 그 표본이 비는 패스마다 누적이 깎여 확정 조건이 사실상
+    # "봇 1차 히트율 > 1/2"가 된다. 실측(수리 전): 1/3 노출 클로커가 하드 FAIL 0회에
+    # 거짓 초록 9/14. 추적 중이면 봇 블록 전체로 다시 확인해 그 편향을 없앤다
+    tracked_spam, tracked_marker = cloak_decision.tracked(working)
+    pre_spam = [k for k in keywords if k in bot_first and k not in user_first]
+    pre_lost = [m for m in markers if m in user_first and m not in bot_first]
+    if pre_spam or pre_lost or tracked_spam or tracked_marker:
         try:
-            note = _gather(site, timeout, spam, lost, user_texts, bot_texts)
+            note = _gather(site, timeout,
+                           _union(pre_spam, tracked_spam),
+                           _union(pre_lost, tracked_marker), user_texts, bot_texts)
         except requests.RequestException as exc:
             return _unknown_cloak("재확인 실패: %s" % type(exc).__name__)
         if note:
             return _unknown_cloak(note)
 
-    working = cloak_decision.load_memory(store)
+    spam, lost = _candidates(keywords, markers, user_first, user_texts, bot_texts)
     verdict = cloak_decision.evaluate(spam, lost, user_texts, bot_texts, working)
     store.clear()
     store.update(working)
     return _cloak_result(verdict)
+
+
+def _candidates(keywords, markers, user_first, user_texts, bot_texts):
+    """판정에 올릴 후보 — **봇 표본 전체**를 본다(1차 표본만 보면 P1-1).
+
+    `user_first`(가장 싼 일반 표본)에 이미 보이는 문구는 후보로 올리지 않는다 —
+    평범한 방문자가 첫눈에 보는 문구는 사이트 내용이지 클로킹이 아니고, 거기에
+    확장 표본을 쓰면 카지노 리뷰 사이트 같은 정상 사이트에 매 패스 20여 요청을
+    쏟게 된다. 살았는지/기각인지의 최종 판정은 evaluate가 전 표본으로 한다.
+    """
+    return (
+        [k for k in keywords
+         if k not in user_first and any(k in text for text in bot_texts)],
+        [m for m in markers
+         if m in user_first and not all(m in text for text in bot_texts)],
+    )
+
+
+def _union(first, second):
+    merged = list(first)
+    merged.extend(key for key in second if key not in merged)
+    return merged
 
 
 def _gather(site, timeout, spam, lost, user_texts, bot_texts):
@@ -261,8 +292,20 @@ def _unknown_rep(reason):
 
 
 def _keywords(site):
-    extra = [k for k in (site.get("spam_keywords") or []) if isinstance(k, str) and k.strip()]
-    return SPAM_KEYWORDS + extra
+    """내장 시그니처 + 사이트별 추가. **중복 제거 필수** (18차 P2-2).
+
+    설정에 내장 키워드와 같은 값이 들어오면(정상 통과하는 설정이다) 같은 문구가
+    두 번 순회돼 한 패스에 누적이 2씩 올라가고, 확정 임계 4가 조용히 2패스로
+    반토막 난다 — 13~17차 오탐 클래스가 설정 파일 하나로 재개방되는 경로다.
+    """
+    extra = [k for k in (site.get("spam_keywords") or [])
+             if isinstance(k, str) and k.strip()]
+    return cloak_decision.dedupe(SPAM_KEYWORDS + extra)
+
+
+def _markers(site):
+    return cloak_decision.dedupe(
+        [m for m in (site.get("markers") or []) if isinstance(m, str)])
 
 
 def _gsb_key():

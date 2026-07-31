@@ -67,8 +67,11 @@ def run_pass(sites, st, alert, persist=True, do_render=True, carry=None):
 
     alert=False(status 명령)면 state를 읽지도 쓰지도 않는다 — 조회가 전이를
     소비해 장애 알림이 증발하던 문제(P1-2)의 교정. 그 계약 때문에 L5 클로킹의
-    **패스 간 누적도 status에서는 성립하지 않는다** — 회전 페이지는 확정까지 못
-    가고 WARN까지만 보인다. 조회 명령이 판정을 앞당기지 않는 쪽이 옳다(정직한 축소).
+    **패스 간 누적이 status에서는 성립하지 않는다** — 매번 빈 기억으로 시작하므로
+    회전 페이지는 확정까지 못 가고(WARN까지), 간헐 노출 사이트는 그 회차 봇 표본이
+    비면 확장조차 하지 않아 🟢으로 보일 수 있다. 즉 status는 `watch`보다 **약하게**
+    보고한다(18차 P3-4 — "WARN까지만"이라고 쓴 초기 서술은 후자를 빠뜨렸다).
+    조회 명령이 판정을 앞당기지 않는 쪽이 옳다는 계약의 대가다.
     do_render=False면 이 패스에서 L4(무거움)를 생략 — watch의 --render-every 주기.
     carry(dict)를 주면 스킵된 간헐 층의 직전 결과를 승계한다 (P1-1 — 거짓 복구 차단).
     반환: (rows, sent_texts) — 상태보드(D2 슬라이스 ③)가 소비. rows의 layers는
