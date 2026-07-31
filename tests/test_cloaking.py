@@ -94,7 +94,7 @@ class CloakingJudgmentTest(unittest.TestCase):
             result = security.check_cloaking(
                 {"url": "http://a.b", "markers": ["데모샵"], "timeout_sec": 5})
         self.assertTrue(result["ok"], result["detail"])
-        self.assertIn("회전 콘텐츠", result["detail"])
+        self.assertIn("클로킹 아님", result["detail"])
         self.assertEqual(len(calls), 3)  # 조기 종료 — 확인 블록을 다 뜨지 않는다
 
     def test_repeated_spam_is_confirmed_fail(self):
@@ -184,31 +184,47 @@ class CloakingRealServerTest(_RealServerCase):
     def _sweep(self, path, passes=12, seed=20260731):
         """한 사이트를 여러 패스 순찰하고 (하드 FAIL 수, 마지막 결과)를 돌려준다.
         축 3(무작위 표본 수)은 시드를 박아 재현 가능하게 만든다 — 무작위성을
-        테스트에서 풀어두면 실패가 재현되지 않아 진단이 불가능하다."""
+        테스트에서 풀어두면 실패가 재현되지 않아 진단이 불가능하다.
+        ⚠️단, 시드 하나의 0은 상한이 아니다 — 아래 다중 시드 단언과 짝으로 본다."""
         rng = random.Random(seed)
         memory, site, fails, result = {}, self._site(path), 0, None
-        with mock.patch.object(cloak_decision, "user_sample_count",
-                               side_effect=lambda: rng.randint(
-                                   cloak_decision.USER_SAMPLE_MIN,
-                                   cloak_decision.USER_SAMPLE_MAX)):
+        with mock.patch.object(
+                cloak_decision, "user_sample_count",
+                side_effect=lambda: rng.randint(cloak_decision.USER_SAMPLE_MIN,
+                                                cloak_decision.USER_SAMPLE_MAX)), \
+             mock.patch.object(
+                cloak_decision, "bot_sample_count",
+                side_effect=lambda: rng.randint(cloak_decision.BOT_SAMPLE_MIN,
+                                                cloak_decision.BOT_SAMPLE_MAX)):
             for _ in range(passes):
                 result = security.check_cloaking(site, memory)
                 fails += 1 if _is_hard_fail(result) else 0
         return fails, result
 
     def test_sequential_rotation_is_never_hard_failed_any_period(self):
-        """순차 회전 주기 2~16 전수 — 어떤 위상에서도 **하드 FAIL(🔴)은 없다.**
+        """순차 회전 주기 2~24 전수 — 어떤 위상에서도 **하드 FAIL(🔴)은 없다.**
 
         13~16차는 "일반 블록이 mod P의 전 잔여류를 덮는다"를 근거로 삼았고, 그
         근거는 P>N에서 반드시 무너졌다(17차: P>=9 전부 오탐). 이제 근거가 다르다 —
         회전이 관측되면(축 1) 유한 표본의 부재를 결론으로 쓰지 않고, 확정은
-        패스 간 누적(축 2)에만 맡기며, 패스 길이를 흔들어(축 3) 위상 락을 없앤다.
-        따라서 이 단언은 '주기 열거'가 아니라 구조에 대한 것이다.
+        패스 간 누적(축 2)에만 맡기며, 양쪽 블록 길이를 흔들어(축 3) 위상 락을 없앤다.
         """
         for path in self.ALL_PERIODS:
             _RotatingHandler.ROTATION.clear()
             fails, _last = self._sweep(path)
             self.assertEqual(fails, 0, "%s 하드 FAIL %d회" % (path, fails))
+
+    def test_rotation_verdict_does_not_depend_on_one_lucky_seed(self):
+        """19차 P2-2 — 위 단언은 시드 하나의 관측치다. 시드를 바꾸면 무너지는
+        '구조적 보장'이 되지 않도록 여러 시드에서 같은 결론을 확인한다.
+        (수리 전 코드에서는 18개 시드 중 4개가 이 스윕을 RED로 만들었다)"""
+        for seed in (17, 42, 4242, 46423, 71420):
+            for path in ("/rotate14", "/rotate15", "/rotate16", "/rotate17",
+                         "/rotate24"):
+                _RotatingHandler.ROTATION.clear()
+                fails, _last = self._sweep(path, passes=8, seed=seed)
+                self.assertEqual(fails, 0, "seed=%d %s 하드 FAIL %d회"
+                                 % (seed, path, fails))
 
     def test_short_period_rotation_is_resolved_within_one_pass(self):
         """주기가 확인 블록 하한 이하면 한 패스에서 기각된다 — 누적을 기다리지
@@ -250,11 +266,18 @@ class CloakingRealServerTest(_RealServerCase):
         self.assertIn("바카라", result["detail"])
 
     def test_intermittent_cloaking_still_detected(self):
-        """15차 P3-3: 봇에게 간헐 노출하는 클로커도 잡아야 한다. 봇 표본 과반
-        (7회 중 4회)이면 안정 페이지에서 그 패스에 확정된다"""
-        result = security.check_cloaking(self._site("/cloak-intermittent2"), {})
-        self.assertTrue(_is_hard_fail(result))
-        self.assertIn("바카라", result["detail"])
+        """15차 P3-3: 봇에게 간헐 노출하는 클로커도 잡아야 한다.
+
+        봇 표본 수가 무작위(축 3을 봇 쪽에도 적용 — 19차 P1-1)라 노출 1/2에서는
+        과반 충족이 그 패스의 뽑기에 달렸다. 즉시 확정이 될 때도 있고 누적으로 갈
+        때도 있으므로, 계약은 "한 패스"가 아니라 **CONFIRM_PASSES 안에 확정**이다.
+        """
+        site, memory = self._site("/cloak-intermittent2"), {}
+        verdicts = [security.check_cloaking(site, memory)
+                    for _ in range(cloak_decision.CONFIRM_PASSES)]
+        self.assertTrue(any(_is_hard_fail(v) for v in verdicts),
+                        [v["detail"] for v in verdicts])
+        self.assertEqual([v for v in verdicts if v["ok"]], [])
 
     def test_low_exposure_cloaking_is_confirmed_and_never_green(self):
         """18차 P1-1 — 봇 노출률이 1/2 **미만**인 클로커.
@@ -273,6 +296,24 @@ class CloakingRealServerTest(_RealServerCase):
                             "%s: 확정 0회 — %s" % (path, [v["detail"] for v in verdicts]))
             self.assertEqual([v for v in verdicts if v["ok"]], [],
                              "%s: 침해된 사이트에 단정형 🟢" % path)
+
+    def test_detection_floor_is_where_the_model_says_it_is(self):
+        """탐지 하한을 **테스트로 박아둔다** — 숨기면 다음 라운드에 "미탐 발견"으로
+        돌아온다. 확정은 순증 누적이라 패스당 후보 관측 확률이 1/2를 넘어야 위로
+        드리프트한다. 봇 표본 B회, 노출률 r이면 조건은 `1-(1-r)^B > 1/2`.
+        B=5~12이므로 하한은 r ≈ 1/12 — 1/6은 확정되고 1/20은 안 된다.
+        (하한을 낮추려면 봇 표본을 늘려야 하고 그건 남의 사이트 부담이다)
+        """
+        _RotatingHandler.ROTATION.clear()
+        above, memory = self._site("/cloak-intermittent6"), {}
+        verdicts = [security.check_cloaking(above, memory) for _ in range(12)]
+        self.assertTrue(any(_is_hard_fail(v) for v in verdicts), "1/6은 확정돼야 한다")
+
+        _RotatingHandler.ROTATION.clear()
+        below, memory = self._site("/cloak-intermittent20"), {}
+        verdicts = [security.check_cloaking(below, memory) for _ in range(12)]
+        self.assertFalse(any(_is_hard_fail(v) for v in verdicts),
+                         "1/20이 확정된다면 하한 모델이 틀린 것 — 문서를 고쳐야 한다")
 
     def test_intermittent_cloaking_never_reports_recovery(self):
         """간헐 클로커에서 🔴→🟢→🔴 플랩이 나면 알림 신뢰가 무너진다.
@@ -318,18 +359,22 @@ class CloakAxisNegativeControlTest(_RealServerCase):
     본다 — 되살아나지 않으면 그 축은 장식이다.
     """
 
-    # 표본 5개면 패스 길이가 정확히 13(일반1+봇1+일반5+봇6)이라 주기 13과 물려
-    # 위상이 매 패스 제자리다 — 축 3을 뗀 상태를 재현하는 값이자, 나머지 두 축을
-    # 결정적으로 관찰하기 위한 고정값이다. (무작위 표본 수를 그대로 두면 음성
-    # 대조가 flaky해져 "RED를 봤다"는 근거 자체가 흔들린다 — 자체 대조에서 겪었다)
-    LOCKED_SAMPLES = 5
+    # 일반 5 + 봇 7이면 확장 패스의 요청 수가 정확히 13(일반1+봇1+일반5+봇6)이라
+    # 주기 13과 물려 위상이 매 패스 제자리다 — 축 3을 뗀 상태를 재현하는 값이자,
+    # 나머지 두 축을 결정적으로 관찰하기 위한 고정값이다. (무작위 표본 수를 그대로
+    # 두면 음성 대조가 flaky해져 "RED를 봤다"는 근거 자체가 흔들린다 — 자체 대조에서
+    # 겪었다.) ⚠️**양쪽 블록을 다 고정해야** 한다 — 봇 쪽을 흔든 채로 두면 패스
+    # 길이가 흔들려 락이 안 걸리고, 대조가 아무것도 제거하지 않은 채 통과한다
+    LOCKED_USER, LOCKED_BOT = 5, 7
     LOCKED_PATH = "/rotate13"
 
     def _hard_fails(self, passes, path=None):
         site = self._site(path or self.LOCKED_PATH)
         memory = {}
         with mock.patch.object(cloak_decision, "user_sample_count",
-                               return_value=self.LOCKED_SAMPLES):
+                               return_value=self.LOCKED_USER), \
+             mock.patch.object(cloak_decision, "bot_sample_count",
+                               return_value=self.LOCKED_BOT):
             return sum(1 for _ in range(passes)
                        if _is_hard_fail(security.check_cloaking(site, memory)))
 
@@ -349,10 +394,7 @@ class CloakAxisNegativeControlTest(_RealServerCase):
     def test_axis2_removed_confirms_on_a_single_pass(self):
         """축 2 제거 = 한 패스로 확정. 같은 첫 패스가 축 2가 있으면 WARN에 머문다
         — 대조군을 나란히 단언해 '장치가 실제로 하중을 받는지'를 고정한다"""
-        # 회전 페이지라 임계는 ROTATING_CONFIRM_PASSES 쪽이다 — 둘 다 1로 내려야
-        # 실제로 "한 패스 확정"이 된다(한쪽만 패치하면 대조가 아무것도 제거하지 않는다)
-        with mock.patch.object(cloak_decision, "CONFIRM_PASSES", 1), \
-             mock.patch.object(cloak_decision, "ROTATING_CONFIRM_PASSES", 1):
+        with mock.patch.object(cloak_decision, "CONFIRM_PASSES", 1):
             self.assertEqual(self._hard_fails(passes=1), 1)
         _RotatingHandler.ROTATION.clear()
         self.assertEqual(self._hard_fails(passes=1), 0)
@@ -364,8 +406,7 @@ class CloakAxisNegativeControlTest(_RealServerCase):
         표본이 패스마다 독립일 때만 뜻이 있다는 증거이고, 축 3이 왜 장식이
         아닌지의 근거다. (축 3을 되살린 같은 주기·같은 패스 수 = 위 스윕에서 0회)
         """
-        self.assertGreater(
-            self._hard_fails(passes=cloak_decision.ROTATING_CONFIRM_PASSES), 0)
+        self.assertGreater(self._hard_fails(passes=cloak_decision.CONFIRM_PASSES), 0)
 
 
 class CloakDecisionTest(unittest.TestCase):
@@ -385,19 +426,29 @@ class CloakDecisionTest(unittest.TestCase):
         self.assertEqual(verdict["spam_confirmed"], [])
         self.assertEqual(verdict["spam_suspect"], [("바카라", 1)])
 
-    def test_rotating_page_needs_more_passes_than_a_stable_one(self):
-        """회전 페이지는 "모두에게 같은 확률로 보인다"는 귀무가설이 아직 살아 있어
-        더 많은 증거를 요구한다 — 임계가 CONFIRM_PASSES가 아니라 ROTATING 쪽이다"""
-        self.assertGreater(cloak_decision.ROTATING_CONFIRM_PASSES,
-                           cloak_decision.CONFIRM_PASSES)
+    def test_rotating_page_needs_the_full_streak(self):
+        """회전이 관측되면 즉시 확정 경로가 막히고 누적만 남는다"""
         memory = {}
         rotating_user = ["배너%d" % i for i in range(6)]
-        for expected in range(1, cloak_decision.ROTATING_CONFIRM_PASSES):
+        for expected in range(1, cloak_decision.CONFIRM_PASSES):
             verdict = self._eval(rotating_user, ["배너9 바카라"] * 7, memory)
             self.assertTrue(verdict["rotating"])
             self.assertEqual(verdict["spam_suspect"], [("바카라", expected)])
         final = self._eval(rotating_user, ["배너9 바카라"] * 7, memory)
         self.assertEqual(final["spam_confirmed"], ["바카라"])
+
+    def test_threshold_does_not_depend_on_this_pass_rotation(self):
+        """19차 P2-1 — 임계를 그 패스의 회전 관측으로 정하면 누적은 공유되는데
+        잣대만 흔들려, 아무것도 관측 안 된 패스의 **감쇠가 확정을 만들고**(5→4가
+        낮아진 임계를 넘음) 후보를 다시 본 패스가 오히려 강등이 된다.
+        임계를 하나로 통일해 그 클래스를 없앴다 — 회전이 오가도 잣대는 그대로다."""
+        memory = {"spam": {"바카라": cloak_decision.CONFIRM_PASSES - 1}}
+        rotating = self._eval(["배너1", "배너2"], ["배너9 바카라"] * 7, memory)
+        self.assertEqual(rotating["spam_confirmed"], ["바카라"])
+        stable = self._eval(["정상"] * 3, ["정상"] * 3, memory)  # 미관측 → 감쇠
+        self.assertEqual(stable["spam_confirmed"], [])
+        self.assertEqual(stable["spam_suspect"],
+                         [("바카라", cloak_decision.CONFIRM_PASSES - 1)])
 
     def test_one_user_sighting_clears_the_streak(self):
         memory = {"spam": {"바카라": 3}}

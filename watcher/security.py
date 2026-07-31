@@ -58,8 +58,12 @@ def check_cloaking(site, memory=None):
     누적·위상 무작위화)와 그 근거는 `watcher/cloak_decision.py` 모듈 docstring에
     있다 — 13~17차에 같은 오탐이 다섯 번 반복된 뒤 축을 바꾼 재설계다.
 
-    요청 비용: 후보가 없으면 **2회**(일반·봇 각 1). 후보가 잡힌 패스만 확장
-    표본으로 올라간다 — 남의 사이트에 평시 부담을 주지 않기 위한 경계다.
+    요청 비용(실측): 아무 후보도 없는 평시 사이트는 **2회**(일반·봇 각 1)로 끝난다.
+    확장은 이번 표본이 후보를 물었거나 **추적 중인 후보가 있을 때** 일어나고, 그
+    패스는 최대 29회(일반 5~16 + 봇 5~12)까지 쓴다. 확정된 클로킹 사이트는 해소될
+    때까지 매 패스 확장이 지속된다 — 남의 사이트에 주는 부담이라 후보가 반증되는
+    즉시 조기 종료한다. (19차 P3-2: 수리 전 docstring이 "후보가 잡힌 패스만"이라고
+    적혀 있었는데 추적 경로가 생긴 뒤로는 사실이 아니었다)
     """
     timeout = site.get("timeout_sec", 10)
     store = memory if isinstance(memory, dict) else {}
@@ -95,26 +99,37 @@ def check_cloaking(site, memory=None):
         if note:
             return _unknown_cloak(note)
 
-    spam, lost = _candidates(keywords, markers, user_first, user_texts, bot_texts)
+    spam, lost = _candidates(keywords, markers, user_texts, bot_texts, working)
     verdict = cloak_decision.evaluate(spam, lost, user_texts, bot_texts, working)
     store.clear()
     store.update(working)
     return _cloak_result(verdict)
 
 
-def _candidates(keywords, markers, user_first, user_texts, bot_texts):
-    """판정에 올릴 후보 — **봇 표본 전체**를 본다(1차 표본만 보면 P1-1).
+def _candidates(keywords, markers, user_texts, bot_texts, working):
+    """판정에 올릴 후보 — **봇 표본 전체**를 본다(1차 표본만 보면 18차 P1-1).
 
-    `user_first`(가장 싼 일반 표본)에 이미 보이는 문구는 후보로 올리지 않는다 —
-    평범한 방문자가 첫눈에 보는 문구는 사이트 내용이지 클로킹이 아니고, 거기에
-    확장 표본을 쓰면 카지노 리뷰 사이트 같은 정상 사이트에 매 패스 20여 요청을
-    쏟게 된다. 살았는지/기각인지의 최종 판정은 evaluate가 전 표본으로 한다.
+    ⚠️여기서 "일반 시점에 보이니까 후보에서 빼자"고 거르면 안 된다 (19차 P2-3).
+    거르면 그 문구는 `rejected`에도 못 들어가고, 그러면 evaluate의 **반증=즉시 소거**
+    경로가 영영 안 돌아 누적이 감쇠로만 빠진다. 그 사이 알림에는 "일반 시점 N회
+    부재"라는, 관측과 정반대인 근거 문장이 실려 나간다(실측 🔴 4패스 + 🟠 3패스).
+    후보로 올리고 evaluate가 반증 처리하게 둔다 — 판정과 비용 결정은 별개다.
+    (확장 표본을 쓸지 말지는 이미 위에서 `pre_spam`/`tracked`로 걸렀다)
+
+    추적 중인 키도 후보에 넣는다 — 이번 표본에 안 보여도 감쇠 대상으로 살려야
+    "미관측"과 "반증"이 구분된다.
     """
+    tracked_spam, tracked_marker = cloak_decision.tracked(working)
     return (
         [k for k in keywords
-         if k not in user_first and any(k in text for text in bot_texts)],
+         if any(k in text for text in bot_texts) or k in tracked_spam],
+        # 마커는 "일반 시점 어딘가에 있는데 봇 시점 어딘가에서는 빠진" 것만 후보다.
+        # 양쪽에 온전히 있는 평범한 마커까지 올리면 정상 사이트의 통과 문구에
+        # 마커 이름이 줄줄이 붙는다
         [m for m in markers
-         if m in user_first and not all(m in text for text in bot_texts)],
+         if (any(m in text for text in user_texts)
+             and any(m not in text for text in bot_texts))
+         or m in tracked_marker],
     )
 
 
@@ -144,7 +159,8 @@ def _gather(site, timeout, spam, lost, user_texts, bot_texts):
         user_texts.append(text)
         if not _alive(spam, lost, user_texts):
             return ""
-    while len(bot_texts) < cloak_decision.BOT_SAMPLES:
+    wanted = cloak_decision.bot_sample_count()
+    while len(bot_texts) < wanted:
         text, note = _fetch_view(site["url"], timeout, ua=BOT_UA,
                                  referer=SEARCH_REFERER)
         if note:
@@ -184,8 +200,10 @@ def _cloak_result(verdict):
         return {"layer": "L5 클로킹", "ok": False, "warn": True,
                 "detail": " · ".join(warns)}
     if verdict["rejected_spam"] or verdict["rejected_marker"]:
+        # 기각 사유를 "회전"으로 단정하지 않는다 — 사이트 내용에 원래 그 문구가
+        # 있는 경우(카지노 리뷰 사이트 등)와 회차마다 오가는 경우가 같은 관측이다
         return {"layer": "L5 클로킹", "ok": True,
-                "detail": "회전 콘텐츠로 판단(일반 시점 %d회 중 확인: %s)"
+                "detail": "일반 시점에서도 확인됨 — 클로킹 아님(일반 %d회 중: %s)"
                           % (verdict["user_seen"],
                              _show(verdict["rejected_spam"] + verdict["rejected_marker"]))}
     return {"layer": "L5 클로킹", "ok": True, "detail": "일반/검색봇 시점 일치"}
@@ -259,8 +277,14 @@ def check_reputation(site):
         matches = (resp.json() or {}).get("matches") or []
     except (json.JSONDecodeError, ValueError):
         return _unknown_rep("조회 응답 형식 이상")
+    if not isinstance(matches, list):
+        # 응답 형태를 신뢰하면 벤더가 스키마를 바꾸는 날 예외가 층 밖으로 새고,
+        # cli가 그걸 "체크 자체 실패" 🔴로 만들어 **사이트 장애로 오귀속**한다
+        # (19차 P3-5). 우리 확인 실패는 unknown이지 사이트 상태가 아니다
+        return _unknown_rep("조회 응답 형식 이상")
     if matches:
-        kinds = sorted({m.get("threatType", "UNKNOWN") for m in matches})
+        kinds = sorted({m.get("threatType", "UNKNOWN") if isinstance(m, dict)
+                        else "UNKNOWN" for m in matches})
         return {"layer": "L5 평판", "ok": False,
                 "detail": "Google 위험 사이트 등재: %s — 방문자에게 경고 화면이 뜨는 상태"
                           % ", ".join(kinds)}

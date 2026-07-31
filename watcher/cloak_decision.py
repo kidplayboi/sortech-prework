@@ -28,6 +28,21 @@ P=2N에서, 배치를 바꾸면 그 배치 길이의 주기에서 다시 뚫린�
   ⚠️축 3이 없으면 축 2는 결정적 회전에서 streak을 그대로 쌓아 K패스 뒤 똑같이
   오탐한다 — 누적은 표본이 패스마다 독립일 때만 뜻이 있다.
 
+## 탐지 하한 — 구조에서 바로 나오는 수치 (숨기지 않는다)
+
+확정은 순증 누적이므로 **패스당 후보를 볼 확률이 1/2를 넘어야** 위로 드리프트한다.
+봇 표본이 패스당 B회일 때 노출률 r인 클로커를 그 패스에 볼 확률은 `1-(1-r)^B`이므로
+드리프트 조건은 `r > 1 - 0.5^(1/B)`다. B=5~12(평균 8.5)면 **r ≳ 1/12**.
+
+즉 검색봇에게 12번에 한 번 미만으로만 스팸을 보여주는 클로커는 🟠 의심에 머물고
+🔴 확정까지 가지 않는다. 실측(24패스): 1/2·1/3·1/4·1/6은 전부 확정, 1/14는 시작
+위상에 따라 확정 또는 의심, 1/16·1/20은 미확정.
+
+이 하한을 더 낮추려면 봇 표본을 늘려야 하는데 그건 남의 사이트에 주는 부담과
+직결된다. 그리고 검색 노출이 목적인 클로커가 봇에게 1/16만 보여주는 것은 스스로
+목적을 깎는 짓이라, 여기서 균형을 잡았다. (19차 P1-1의 잔여 — 벽 자체를 없앤 게
+아니라 1/13에서 1/12쯤으로 옮기고 그 위치를 계산 가능하게 만든 것이다)
+
 ## 판정 밖에 남는 한계 (문서·README에 그대로 쓴다)
 
 - 회전이 관측되는 페이지에서 **진짜 클로킹의 확정이 최대 K패스 지연**된다.
@@ -40,23 +55,27 @@ import random
 # 확정에 필요한 연속 재현 패스 수. 3이 아니라 4인 이유: 주기 12 결정적 회전에서
 # 패스당 escalation 확률이 ~1/12이므로 K=3이면 하루 0.33건(288패스 기준) 오탐이
 # 남는다. K=4면 0.03건/일 — 대신 회전 페이지의 확정이 1패스 더 늦다(WARN은 즉시).
-CONFIRM_PASSES = 4
-# 회전이 관측된 페이지는 임계를 더 높게 잡는다. 추적 중인 후보를 봇 블록 전체로
-# 다시 확인하면(18차 P1-1 수리) 간헐 클로커는 살아나지만, 회전 페이지에서는 그
-# 재확인이 **밀도까지 증거로 세어** 누적을 밀어 올린다 — 주기 16에서 하드 FAIL
-# 2/1206이 실측됐다. 회전 중에는 "모두에게 같은 확률로 보인다"는 귀무가설이 아직
-# 살아 있으므로 더 많은 증거를 요구하는 것이 맞다. 확정은 그만큼 늦지만(WARN은 즉시)
-# 오탐은 임계 하나당 대략 한 자릿수씩 줄어든다
-ROTATING_CONFIRM_PASSES = 6
+# 확정에 필요한 순증 누적. **회전 여부로 나누지 않는다** — 19차 P2-1: 임계를 그
+# 패스의 회전 관측으로 정하면 누적은 공유되는데 잣대만 흔들려, 아무것도 관측되지
+# 않은 패스에서 감쇠(5→4)가 낮아진 임계를 넘어 확정되거나, 후보를 다시 본 패스가
+# 오히려 🔴→🟠 강등이 된다. 하나로 통일하는 쪽이 그 클래스를 통째로 없앤다.
+# 값 6은 회전 오탐 실측이 정한다(임계 4 대비 13~22배 감소, 19차 러너 소크).
+CONFIRM_PASSES = 6
+# 확정 후에도 이만큼까지만 쌓는다 — 해소되면 몇 패스 안에 의심으로 내려온다
+STREAK_CAP = CONFIRM_PASSES + 2
 # 일반 시점 확인 블록 길이 범위 (축 3). 12개 연속 정수 — 상한이 아니라 **폭**이
 # 설계값이다. 하한 5는 주기 5 이하를 한 패스에서 구조적으로 덮는다.
 USER_SAMPLE_MIN = 5
 USER_SAMPLE_MAX = 16
 # 봇 시점 표본 — 즉시 확정의 과반 판정과 마커 소실 재확인(17차 P2-2)에 쓰인다.
-# 7인 이유는 실측이다: 5표본(과반 3)이면 요청마다 10% 확률로 끼는 삽입이 우연히
-# 과반을 채워 0.5%/패스가 남았고, 7표본(과반 4)에서 그게 사라졌다. 간헐 클로커
-# (봇 2회 중 1회 노출)는 7표본에서 4회 노출이라 즉시 확정이 그대로 유지된다
-BOT_SAMPLES = 7
+# ⚠️**여기도 흔들어야 한다** (19차 P1-1). 7로 고정했더니 봇 시점 위상이 매 패스
+# 정확히 7씩만 움직여, 봇 노출 주기가 14(=2×7)의 배수인 클로커는 봇 표본이 스팸
+# 회차를 영원히 못 밟았다 — 노출 1/13까지는 300패스 전수 100% 확정인데 1/14부터
+# 0%. 이 모듈 첫머리에 적어둔 aliasing 법칙("표본 수 N을 늘리면 P=2N에서 다시
+# 뚫린다")에 내가 그대로 걸린 것이다. 축 3은 **양쪽 블록에 대칭으로** 적용한다.
+# 하한 5는 과반 판정이 성립하는 최소 표본, 폭 8은 비용(패스당 최대 요청)과의 타협.
+BOT_SAMPLE_MIN = 5
+BOT_SAMPLE_MAX = 12
 
 _KINDS = ("spam", "marker")
 
@@ -64,6 +83,11 @@ _KINDS = ("spam", "marker")
 def user_sample_count(rand=random.randint):
     """이번 패스에 뜰 일반 표본 수 (축 3). rand 주입 = 테스트에서 위상 고정용."""
     return rand(USER_SAMPLE_MIN, USER_SAMPLE_MAX)
+
+
+def bot_sample_count(rand=random.randint):
+    """이번 패스에 뜰 검색봇 표본 수 (축 3 — 봇 쪽 대칭 적용, 19차 P1-1)."""
+    return rand(BOT_SAMPLE_MIN, BOT_SAMPLE_MAX)
 
 
 def dedupe(items):
@@ -131,9 +155,12 @@ def evaluate(spam_candidates, marker_candidates, user_texts, bot_texts, memory,
     spam_candidates = dedupe(spam_candidates)
     marker_candidates = dedupe(marker_candidates)
     alive = {
-        # 스팸: 일반 시점 **전부**에서 부재해야 후보로 남는다
+        # 스팸: 이번 봇 표본 어딘가에 있고 일반 시점 **전부**에서 부재해야 살아 있다.
+        # 봇 노출 조건을 여기서 요구해야 추적 중인 키를 후보 목록에 넣어도(반증
+        # 경로를 살리기 위해 필요하다 — 19차 P2-3) 증거 없이 누적이 오르지 않는다
         "spam": [k for k in spam_candidates
-                 if all(k not in text for text in user_texts)],
+                 if any(k in text for text in bot_texts)
+                 and all(k not in text for text in user_texts)],
         # 마커는 반대 방향 — 일반 시점 **전부**에 있고 봇 시점 **전부**에 없어야
         # 한다. 한 표본이라도 일반 시점에서 빠지면 회전으로 설명되고, 한 표본이라도
         # 봇 시점에 보이면 봇도 보는 것이다. 이 경로는 13~16차 내내 재표본이 0회인
@@ -147,20 +174,25 @@ def evaluate(spam_candidates, marker_candidates, user_texts, bot_texts, memory,
     verdict = {
         "rotating": rotating, "bot_hits": bot_hits, "confirm_passes": confirm_passes,
         "user_seen": len(user_texts), "bot_seen": len(bot_texts),
-        "rejected_spam": [k for k in spam_candidates if k not in alive["spam"]],
-        "rejected_marker": [m for m in marker_candidates if m not in alive["marker"]],
+        # 기각 = **적극적 반증**만이다. "이번에 안 보였다"는 기각이 아니라 미관측이고
+        # (그건 _age가 감쇠로 처리한다), 둘을 섞으면 관측 부재가 해소로 둔갑한다
+        "rejected_spam": [k for k in spam_candidates
+                          if any(k in text for text in user_texts)],
+        "rejected_marker": [m for m in marker_candidates
+                            if any(m not in text for text in user_texts)
+                            or any(m in text for text in bot_texts)],
     }
-    needed = ROTATING_CONFIRM_PASSES if rotating else confirm_passes
-    verdict["confirm_passes"] = needed
     for kind in _KINDS:
         bucket = memory.setdefault(kind, {})
         _age(bucket, alive[kind], set(verdict["rejected_" + kind]))
         for key in alive[kind]:
-            bucket[key] = min(bucket[key] + 1, needed * 2)
+            bucket[key] = min(bucket[key] + 1, STREAK_CAP)
             if _immediate(kind, key, rotating, bot_hits, len(bot_texts)):
-                bucket[key] = max(bucket[key], needed)
-        verdict[kind + "_confirmed"] = [k for k, n in bucket.items() if n >= needed]
-        verdict[kind + "_suspect"] = [(k, n) for k, n in bucket.items() if n < needed]
+                bucket[key] = max(bucket[key], confirm_passes)
+        verdict[kind + "_confirmed"] = [k for k, n in bucket.items()
+                                        if n >= confirm_passes]
+        verdict[kind + "_suspect"] = [(k, n) for k, n in bucket.items()
+                                      if n < confirm_passes]
         verdict[kind + "_unseen"] = [k for k in bucket if k not in alive[kind]]
     return verdict
 
