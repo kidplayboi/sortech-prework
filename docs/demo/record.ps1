@@ -1,4 +1,4 @@
-# 녹화기 — 데스크톱에 이미 떠 있는 터미널 창의 '영역'만 찍는다.
+﻿# 녹화기 — 데스크톱에 이미 떠 있는 터미널 창의 '영역'만 찍는다.
 #
 # 왜 창을 새로 안 만드나: 에이전트 셸에서 띄운 창은 대화형 데스크톱에 안 붙는다
 # (6회 실측 — plain console·wt -w new·notepad 전부 EnumWindows에서 안 보임).
@@ -24,8 +24,15 @@ public class W32 {
 "@
 Add-Type -AssemblyName System.Windows.Forms
 
-$ff = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.2-full_build\bin\ffmpeg.exe"
-if (-not (Test-Path $ff)) { throw "ffmpeg 없음: $ff" }
+# ffmpeg 위치 — 후보 순서: ① PATH  ② 이 PC 실제 위치 ~\.local\ffmpeg  ③ WinGet.
+# 새 터미널 -NoProfile에선 .local\ffmpeg가 PATH에 없어 ①이 비므로 ②가 필요.
+$ff = @(
+    (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source,
+    (Join-Path $env:USERPROFILE ".local\ffmpeg\ffmpeg.exe"),
+    (Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Gyan.FFmpeg*\*\bin\ffmpeg.exe" -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty FullName)
+) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+if (-not $ff -or -not (Test-Path $ff)) { throw "ffmpeg 없음 — PATH나 WinGet에 설치 필요 (winget install Gyan.FFmpeg)" }
 if (-not $Out) { $Out = Join-Path $PSScriptRoot "..\..\..\demo-recording.mp4" }
 
 $term = Get-Process -Name WindowsTerminal -ErrorAction SilentlyContinue |

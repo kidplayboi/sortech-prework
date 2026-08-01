@@ -42,7 +42,9 @@ try {
 } finally { $word.Quit() }
 """ % (",".join("'%s'" % d for d in DOCS), SRC, SRC)
     script = REPO / "tools" / "_topdf.ps1"
-    script.write_text(ps, encoding="utf-8")
+    # Windows PowerShell은 BOM 없는 UTF-8을 ANSI(cp949)로 읽어 한글 리터럴을
+    # 깨뜨린다("쪽"·문서명) → 파싱 실패. BOM(utf-8-sig)을 붙여 UTF-8로 읽게 한다.
+    script.write_text(ps, encoding="utf-8-sig")
     try:
         subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
                         "-File", str(script)], check=True)
